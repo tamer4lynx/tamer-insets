@@ -1,0 +1,4 @@
+node_modules
+dist
+android/build
+android/.gradle

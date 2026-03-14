@@ -13,7 +13,9 @@ function toInsets(raw) {
     };
 }
 function toKeyboard(raw) {
-    return { visible: raw.visible, height: parseFloat(String(raw.height)), raw };
+    const height = parseFloat(String(raw.height));
+    const visible = raw.visible && height > 0;
+    return { visible, height: visible ? height : 0, raw };
 }
 function parsePayload(event) {
     if (event && typeof event === 'object' && 'payload' in event && typeof event.payload === 'string') {
@@ -31,9 +33,12 @@ export function useInsets() {
     useEffect(() => {
         const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined;
         const handleInsetsChange = (event) => {
-            const nextInsets = parsePayload(event);
-            if (nextInsets && typeof nextInsets.top === 'number')
-                setInsets(toInsets(nextInsets));
+            try {
+                const nextInsets = parsePayload(event);
+                if (nextInsets && typeof nextInsets.top === 'number')
+                    setInsets(toInsets(nextInsets));
+            }
+            catch (_) { }
         };
         bridge?.addListener?.('tamer-insets:change', handleInsetsChange);
         try {
@@ -54,9 +59,12 @@ export function useKeyboard() {
     useEffect(() => {
         const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined;
         const handleKeyboardChange = (event) => {
-            const nextKeyboard = parsePayload(event);
-            if (nextKeyboard && typeof nextKeyboard.visible === 'boolean')
-                setKeyboard(toKeyboard(nextKeyboard));
+            try {
+                const nextKeyboard = parsePayload(event);
+                if (nextKeyboard && typeof nextKeyboard.visible === 'boolean')
+                    setKeyboard(toKeyboard(nextKeyboard));
+            }
+            catch (_) { }
         };
         bridge?.addListener?.('tamer-insets:keyboard', handleKeyboardChange);
         try {

@@ -5,7 +5,6 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import android.util.Log
 import com.lynx.jsbridge.LynxMethod
@@ -34,15 +33,24 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
 
         fun attachHostView(view: View?) {
             if (hostView !== view) {
-                hostView?.let { current ->
-                    ViewCompat.setOnApplyWindowInsetsListener(current, null)
-                    ViewCompat.setWindowInsetsAnimationCallback(current, null)
-                }
+                hostView?.let { ViewCompat.setOnApplyWindowInsetsListener(it, null) }
             }
             Log.i("TamerInsets", "attachHostView: $view (instance is ${if (instance != null) "SET" else "NULL"})")
             hostView = view
             view?.let {
                 instance?.setupInsetsListener(it)
+            }
+        }
+
+        fun reRequestInsets() {
+            val view = hostView ?: return
+            instance?.resetCachedValues()
+            view.post {
+                ViewCompat.requestApplyInsets(view)
+                ViewCompat.getRootWindowInsets(view)?.let { insets ->
+                    instance?.updateInsets(insets)
+                    instance?.updateKeyboardState(insets)
+                }
             }
         }
     }
@@ -52,8 +60,8 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
     private var lastLeft: Int = -1
     private var lastRight: Int = -1
     private var lastBottom: Int = -1
-    private var lastImeVisible: Boolean? = null
-    private var lastImeHeight: Int = -1
+    private var lastImeVisible: Boolean = false
+    private var lastImeHeight: Int = 0
 
     init {
         Log.i("TamerInsets", "TamerInsetsModule init")
@@ -64,38 +72,45 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         }
     }
 
+    fun resetCachedValues() {
+        lastTop = -1
+        lastLeft = -1
+        lastRight = -1
+        lastBottom = -1
+        lastImeVisible = false
+        lastImeHeight = 0
+    }
+
     fun setupInsetsListener(view: View) {
+        resetCachedValues()
         ViewCompat.setOnApplyWindowInsetsListener(view) { _, insets ->
             updateInsets(insets)
-            updateKeyboard(insets)
+            updateKeyboardState(insets)
             insets
         }
-        ViewCompat.setWindowInsetsAnimationCallback(
-            view,
-            object : WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
-                override fun onProgress(
-                    insets: WindowInsetsCompat,
-                    runningAnimations: MutableList<WindowInsetsAnimationCompat>
-                ): WindowInsetsCompat {
-                    updateKeyboard(insets)
-                    return insets
-                }
-
-                override fun onEnd(animation: WindowInsetsAnimationCompat) {
-                    ViewCompat.getRootWindowInsets(view)?.let { latest ->
-                        updateInsets(latest)
-                        updateKeyboard(latest)
-                    }
-                }
-            }
-        )
         view.post {
             ViewCompat.requestApplyInsets(view)
             ViewCompat.getRootWindowInsets(view)?.let {
                 updateInsets(it)
-                updateKeyboard(it)
+                updateKeyboardState(it)
             }
         }
+    }
+
+    private fun updateKeyboardState(insets: WindowInsetsCompat) {
+        val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+        val imeHeight = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+        val effectiveVisible = imeVisible && imeHeight > 0
+        val effectiveHeight = if (effectiveVisible) imeHeight else 0
+        if (effectiveVisible == lastImeVisible && effectiveHeight == lastImeHeight) return
+        lastImeVisible = effectiveVisible
+        lastImeHeight = effectiveHeight
+        Log.d("TamerInsets", "updateKeyboard: visible=$effectiveVisible, height=$effectiveHeight")
+        val map = JavaOnlyMap().apply {
+            putBoolean("visible", effectiveVisible)
+            putDouble("height", effectiveHeight.toDouble())
+        }
+        emitGlobalEvent("tamer-insets:keyboard", map)
     }
 
     private fun updateInsets(insets: WindowInsetsCompat) {
@@ -120,23 +135,10 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         emitGlobalEvent("tamer-insets:change", map)
     }
 
-    private fun updateKeyboard(insets: WindowInsetsCompat) {
-        val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
-        val imeHeight = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-        if (imeVisible == lastImeVisible && imeHeight == lastImeHeight) return
-        lastImeVisible = imeVisible
-        lastImeHeight = imeHeight
-        Log.d("TamerInsets", "updateKeyboard: visible=$imeVisible, height=$imeHeight")
-        val map = JavaOnlyMap().apply {
-            putBoolean("visible", imeVisible)
-            putDouble("height", imeHeight.toDouble())
-        }
-        emitGlobalEvent("tamer-insets:keyboard", map)
-    }
-
     private fun emitGlobalEvent(name: String, map: JavaOnlyMap) {
         mainHandler.post {
             val view = hostView ?: return@post
+            if (!view.isAttachedToWindow) return@post
             val lynxView = view as? com.lynx.tasm.LynxView ?: return@post
             val lynxContext = lynxView.lynxContext ?: return@post
             try {
@@ -168,9 +170,11 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
     }
 
     private fun currentKeyboardMap(): JavaOnlyMap {
+        val visible = lastImeVisible && lastImeHeight > 0
+        val height = if (visible) lastImeHeight else 0
         return JavaOnlyMap().apply {
-            putBoolean("visible", lastImeVisible == true)
-            putDouble("height", lastImeHeight.coerceAtLeast(0).toDouble())
+            putBoolean("visible", visible)
+            putDouble("height", height.toDouble())
         }
     }
 
@@ -193,7 +197,7 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
     fun getKeyboard(callback: Callback) {
         mainHandler.post {
             hostView?.let { view ->
-                ViewCompat.getRootWindowInsets(view)?.let { updateKeyboard(it) }
+                ViewCompat.getRootWindowInsets(view)?.let { updateKeyboardState(it) }
             }
             val map = currentKeyboardMap()
             try {
