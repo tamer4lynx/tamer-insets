@@ -1,9 +1,20 @@
 {
   "platforms": {
+    "ios": {
+      "podspecPath": "ios/tamerinsets",
+      "moduleClassName": "TamerInsetsModule"
+    },
     "android": {
       "packageName": "com.nanofuxion.tamerinsets",
       "moduleClassName": "com.nanofuxion.tamerinsets.TamerInsetsModule",
-      "sourceDir": "android"
+      "sourceDir": "android",
+      "activityPatches": {
+        "onViewAttached": "com.nanofuxion.tamerinsets.TamerInsetsModule.attachHostView(lynxView)",
+        "onViewDetached": "com.nanofuxion.tamerinsets.TamerInsetsModule.attachHostView(null)",
+        "onResume": "com.nanofuxion.tamerinsets.TamerInsetsModule.reRequestInsets()",
+        "onWindowFocusChanged": "com.nanofuxion.tamerinsets.TamerInsetsModule.reRequestInsets()",
+        "onCreateDelayed": "com.nanofuxion.tamerinsets.TamerInsetsModule.reRequestInsets()"
+      }
     }
   }
 }

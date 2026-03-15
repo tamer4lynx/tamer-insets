@@ -57,7 +57,10 @@ function toKeyboard(raw: KeyboardState): KeyboardStateWithRaw {
   return { visible, height: visible ? height : 0, raw }
 }
 
-function parsePayload<T>(event: EventPayload<T>): T | null {
+function parsePayload<T>(event: EventPayload<T> | string): T | null {
+  if (typeof event === 'string') {
+    try { return JSON.parse(event) as T } catch { return null }
+  }
   if (event && typeof event === 'object' && 'payload' in event && typeof event.payload === 'string') {
     try {
       return JSON.parse(event.payload) as T
@@ -65,7 +68,6 @@ function parsePayload<T>(event: EventPayload<T>): T | null {
       return null
     }
   }
-
   return event as T
 }
 
@@ -85,8 +87,9 @@ export function useInsets() {
     bridge?.addListener?.('tamer-insets:change', handleInsetsChange)
 
     try {
-      NativeModules?.TamerInsetsModule?.getInsets?.((res: Insets) => {
-        if (res && typeof res.top === 'number') setInsets(toInsets(res))
+      NativeModules?.TamerInsetsModule?.getInsets?.((res: any) => {
+        const data = parsePayload<Insets>(res)
+        if (data && typeof data.top === 'number') setInsets(toInsets(data))
       })
     } catch (_) {}
 
@@ -114,8 +117,9 @@ export function useKeyboard() {
     bridge?.addListener?.('tamer-insets:keyboard', handleKeyboardChange)
 
     try {
-      NativeModules?.TamerInsetsModule?.getKeyboard?.((res: KeyboardState) => {
-        if (res && typeof res.visible === 'boolean') setKeyboard(toKeyboard(res))
+      NativeModules?.TamerInsetsModule?.getKeyboard?.((res: any) => {
+        const data = parsePayload<KeyboardState>(res)
+        if (data && typeof data.visible === 'boolean') setKeyboard(toKeyboard(data))
       })
     } catch (_) {}
 
