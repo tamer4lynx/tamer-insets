@@ -10,6 +10,7 @@ export interface InsetsWithRaw extends Insets {
 export interface KeyboardState {
     visible: boolean;
     height: number;
+    duration: number;
 }
 export interface KeyboardStateWithRaw extends KeyboardState {
     raw: KeyboardState;

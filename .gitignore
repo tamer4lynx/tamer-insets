@@ -1,4 +1,9 @@
 node_modules
 dist
+.env*
+.DS_Store
+*.tsbuildinfo
 android/build
 android/.gradle
+ios/build
+ios/Pods

@@ -116,6 +116,7 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         val map = JavaOnlyMap().apply {
             putBoolean("visible", effectiveVisible)
             putDouble("height", effectiveHeight.toDouble())
+            putDouble("duration", 0.0)
         }
         emitGlobalEvent("tamer-insets:keyboard", map)
     }
@@ -156,6 +157,7 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
                     if (map.hasKey("bottom")) put("bottom", map.getDouble("bottom"))
                     if (map.hasKey("visible")) put("visible", map.getBoolean("visible"))
                     if (map.hasKey("height")) put("height", map.getDouble("height"))
+                    if (map.hasKey("duration")) put("duration", map.getDouble("duration"))
                 }.toString()
                 val params = JavaOnlyArray().apply {
                     pushMap(JavaOnlyMap().apply { putString("payload", payload) })
@@ -182,6 +184,7 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         return JavaOnlyMap().apply {
             putBoolean("visible", visible)
             putDouble("height", height.toDouble())
+            putDouble("duration", 0.0)
         }
     }
 

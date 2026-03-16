@@ -32,13 +32,15 @@ function MyComponent() {
 | Hook | Returns | Description |
 |------|---------|-------------|
 | `useInsets()` | `InsetsWithRaw` | `{ top, right, bottom, left, raw }` — system safe area insets |
-| `useKeyboard()` | `KeyboardStateWithRaw` | `{ visible, height, raw }` — keyboard visibility and height |
+| `useKeyboard()` | `KeyboardStateWithRaw` | `{ visible, height, duration, raw }` — keyboard visibility, height (px), and animation duration (ms) |
 
 **Types:**
 - `Insets` — `{ top, right, bottom, left }`
 - `InsetsWithRaw` — extends Insets with `raw: Insets`
-- `KeyboardState` — `{ visible: boolean, height: number }`
+- `KeyboardState` — `{ visible: boolean, height: number, duration: number }`
 - `KeyboardStateWithRaw` — extends KeyboardState with `raw`
+
+Listens to `tamer-insets:keyboard` (Android) and `keyboardstatuschanged` (iOS) events.
 
 ## Platform
 

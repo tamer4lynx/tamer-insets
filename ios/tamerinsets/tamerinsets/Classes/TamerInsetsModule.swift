@@ -40,6 +40,7 @@ public final class TamerInsetsModule: NSObject, LynxModule {
 
     private var isKeyboardVisible = false
     private var keyboardHeight: CGFloat = 0
+    private var keyboardDuration: Int = 0
 
     @objc public required init(param: Any) {
         super.init()
@@ -56,12 +57,13 @@ public final class TamerInsetsModule: NSObject, LynxModule {
 
     private func setup() {
         attachObserverView()
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(keyboardWillChange(_:)),
-            name: UIResponder.keyboardWillChangeFrameNotification,
-            object: nil
-        )
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(keyboardWillShow(_:)),
+                       name: UIResponder.keyboardWillShowNotification, object: nil)
+        nc.addObserver(self, selector: #selector(keyboardWillHide(_:)),
+                       name: UIResponder.keyboardWillHideNotification, object: nil)
+        nc.addObserver(self, selector: #selector(keyboardWillChange(_:)),
+                       name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
     }
 
     private func keyWindow() -> UIWindow? {
@@ -119,18 +121,43 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         sendEvent("tamer-insets:change", payload: payload)
     }
 
+    @objc private func keyboardWillShow(_ notification: Notification) {
+        handleKeyboardNotification(notification, forceVisible: true)
+    }
+
+    @objc private func keyboardWillHide(_ notification: Notification) {
+        handleKeyboardNotification(notification, forceVisible: false)
+    }
+
     @objc private func keyboardWillChange(_ notification: Notification) {
+        handleKeyboardNotification(notification, forceVisible: nil)
+    }
+
+    private func handleKeyboardNotification(_ notification: Notification, forceVisible: Bool?) {
         guard let userInfo = notification.userInfo,
               let endFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-        let screenHeight = UIScreen.main.bounds.height
-        let height = max(0, screenHeight - endFrame.origin.y)
-        let visible = height > 0
+
+        let windowHeight: CGFloat
+        if #available(iOS 13.0, *) {
+            windowHeight = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap { $0.windows }
+                .first { $0.isKeyWindow }?.bounds.height ?? UIScreen.main.bounds.height
+        } else {
+            windowHeight = UIScreen.main.bounds.height
+        }
+
+        let rawHeight = max(0, windowHeight - endFrame.origin.y)
+        let visible = forceVisible ?? (rawHeight > 1)
+        let height = visible ? rawHeight : 0
+        let duration = Int(((userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25) * 1000)
 
         if visible == isKeyboardVisible && height == keyboardHeight { return }
         isKeyboardVisible = visible
         keyboardHeight = height
+        keyboardDuration = duration
 
-        let payload = "{\"visible\":\(visible ? "true" : "false"),\"height\":\(height)}"
+        let payload = "{\"visible\":\(visible ? "true" : "false"),\"height\":\(height),\"duration\":\(duration)}"
         sendEvent("tamer-insets:keyboard", payload: payload)
     }
 
@@ -152,6 +179,7 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         callback([
             "visible": visible,
             "height": visible ? keyboardHeight : 0,
+            "duration": keyboardDuration,
         ] as [String: Any])
     }
 

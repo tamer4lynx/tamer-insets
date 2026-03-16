@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 const DEFAULT_RAW_INSETS = { top: 0, right: 0, bottom: 0, left: 0 };
 const DEFAULT_INSETS = { ...DEFAULT_RAW_INSETS, raw: DEFAULT_RAW_INSETS };
-const DEFAULT_RAW_KEYBOARD = { visible: false, height: 0 };
+const DEFAULT_RAW_KEYBOARD = { visible: false, height: 0, duration: 0 };
 const DEFAULT_KEYBOARD = { ...DEFAULT_RAW_KEYBOARD, raw: DEFAULT_RAW_KEYBOARD };
 function toInsets(raw) {
     return {
@@ -15,7 +15,8 @@ function toInsets(raw) {
 function toKeyboard(raw) {
     const height = parseFloat(String(raw.height));
     const visible = raw.visible && height > 0;
-    return { visible, height: visible ? height : 0, raw };
+    const duration = parseFloat(String(raw.duration ?? 0)) || 0;
+    return { visible, height: visible ? height : 0, duration, raw };
 }
 function parsePayload(event) {
     if (typeof event === 'string') {
@@ -63,11 +64,36 @@ export function useInsets() {
     }, []);
     return insets;
 }
+function fromLynxKeyboardEvent(evOrIsShow, heightArg) {
+    let isShow;
+    let height;
+    if (heightArg !== undefined && heightArg !== null) {
+        isShow = evOrIsShow;
+        height = parseFloat(String(heightArg)) || 0;
+    }
+    else if (Array.isArray(evOrIsShow) && evOrIsShow.length >= 2) {
+        isShow = evOrIsShow[0];
+        height = parseFloat(String(evOrIsShow[1])) || 0;
+    }
+    else if (evOrIsShow && typeof evOrIsShow === 'object' && 'payload' in evOrIsShow) {
+        const p = evOrIsShow.payload;
+        if (Array.isArray(p) && p.length >= 2) {
+            isShow = p[0];
+            height = parseFloat(String(p[1])) || 0;
+        }
+        else
+            return null;
+    }
+    else
+        return null;
+    const visible = isShow === 'on' || isShow === true;
+    return { visible, height: visible ? height : 0, duration: 250 };
+}
 export function useKeyboard() {
     const [keyboard, setKeyboard] = useState(DEFAULT_KEYBOARD);
     useEffect(() => {
         const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined;
-        const handleKeyboardChange = (event) => {
+        const handleTamerKeyboard = (event) => {
             try {
                 const nextKeyboard = parsePayload(event);
                 if (nextKeyboard && typeof nextKeyboard.visible === 'boolean')
@@ -75,7 +101,13 @@ export function useKeyboard() {
             }
             catch (_) { }
         };
-        bridge?.addListener?.('tamer-insets:keyboard', handleKeyboardChange);
+        const handleLynxKeyboard = (evOrIsShow, heightArg) => {
+            const next = fromLynxKeyboardEvent(evOrIsShow, heightArg);
+            if (next)
+                setKeyboard(toKeyboard(next));
+        };
+        bridge?.addListener?.('tamer-insets:keyboard', handleTamerKeyboard);
+        bridge?.addListener?.('keyboardstatuschanged', handleLynxKeyboard);
         try {
             NativeModules?.TamerInsetsModule?.getKeyboard?.((res) => {
                 const data = parsePayload(res);
@@ -85,7 +117,8 @@ export function useKeyboard() {
         }
         catch (_) { }
         return () => {
-            bridge?.removeListener?.('tamer-insets:keyboard', handleKeyboardChange);
+            bridge?.removeListener?.('tamer-insets:keyboard', handleTamerKeyboard);
+            bridge?.removeListener?.('keyboardstatuschanged', handleLynxKeyboard);
         };
     }, []);
     return keyboard;
