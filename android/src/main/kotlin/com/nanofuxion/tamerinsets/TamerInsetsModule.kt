@@ -88,12 +88,19 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
             updateKeyboardState(insets)
             insets
         }
+        view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                v.post { reRequestInsets() }
+                v.postDelayed({ reRequestInsets() }, 50)
+            }
+            override fun onViewDetachedFromWindow(v: View) {}
+        })
         view.post {
             ViewCompat.requestApplyInsets(view)
             ViewCompat.getRootWindowInsets(view)?.let {
                 updateInsets(it)
                 updateKeyboardState(it)
-            }
+            } ?: view.postDelayed({ reRequestInsets() }, 100)
         }
     }
 

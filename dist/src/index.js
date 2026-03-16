@@ -18,6 +18,14 @@ function toKeyboard(raw) {
     return { visible, height: visible ? height : 0, raw };
 }
 function parsePayload(event) {
+    if (typeof event === 'string') {
+        try {
+            return JSON.parse(event);
+        }
+        catch {
+            return null;
+        }
+    }
     if (event && typeof event === 'object' && 'payload' in event && typeof event.payload === 'string') {
         try {
             return JSON.parse(event.payload);
@@ -43,8 +51,9 @@ export function useInsets() {
         bridge?.addListener?.('tamer-insets:change', handleInsetsChange);
         try {
             NativeModules?.TamerInsetsModule?.getInsets?.((res) => {
-                if (res && typeof res.top === 'number')
-                    setInsets(toInsets(res));
+                const data = parsePayload(res);
+                if (data && typeof data.top === 'number')
+                    setInsets(toInsets(data));
             });
         }
         catch (_) { }
@@ -69,8 +78,9 @@ export function useKeyboard() {
         bridge?.addListener?.('tamer-insets:keyboard', handleKeyboardChange);
         try {
             NativeModules?.TamerInsetsModule?.getKeyboard?.((res) => {
-                if (res && typeof res.visible === 'boolean')
-                    setKeyboard(toKeyboard(res));
+                const data = parsePayload(res);
+                if (data && typeof data.visible === 'boolean')
+                    setKeyboard(toKeyboard(data));
             });
         }
         catch (_) { }
