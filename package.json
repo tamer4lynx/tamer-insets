@@ -1,6 +1,7 @@
 {
-  "name": "tamer-insets",
-  "version": "0.1.0",
+  "name": "@tamer4lynx/tamer-insets",
+  "publishConfig": { "access": "public", "tag": "prerelease" },
+  "version": "0.0.1",
   "type": "module",
   "description": "Hooks for system insets and keyboard state in Lynx.",
   "main": "dist/src/index.js",
@@ -12,7 +13,7 @@
       "default": "./dist/src/index.js"
     }
   },
-  "files": ["dist", "android", "lynx.ext.json"],
+  "files": ["dist", "android/src", "android/build.gradle.kts", "lynx.ext.json"],
   "lynx": { "ext": "lynx.ext.json" },
   "scripts": {
     "build": "tsc"

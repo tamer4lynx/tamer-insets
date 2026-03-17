@@ -5,7 +5,7 @@ Hooks for system insets and keyboard state in Lynx.
 ## Installation
 
 ```bash
-npm install tamer-insets
+npm install @tamer4lynx/tamer-insets
 ```
 
 Add to your app's dependencies and run `t4l link`.
@@ -13,7 +13,7 @@ Add to your app's dependencies and run `t4l link`.
 ## Usage
 
 ```tsx
-import { useInsets, useKeyboard, type InsetsWithRaw, type KeyboardStateWithRaw } from 'tamer-insets'
+import { useInsets, useKeyboard, type InsetsWithRaw, type KeyboardStateWithRaw } from '@tamer4lynx/tamer-insets'
 
 function MyComponent() {
   const insets = useInsets()
