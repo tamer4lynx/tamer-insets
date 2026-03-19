@@ -45,3 +45,7 @@ Listens to `tamer-insets:keyboard` (Android) and `keyboardstatuschanged` (iOS) e
 ## Platform
 
 Uses **lynx.ext.json**. Run `t4l link` after adding to your app. Requires `TamerInsetsModule` native module.
+
+### iOS
+
+After you add your `LynxView` to the hierarchy, call **`TamerInsetsModule.attachHostView(lynxView)`** so safe-area and keyboard overlap match the Lynx surface (home indicator, keyboard). Call **`TamerInsetsModule.attachHostView(nil)`** before tearing the view down. Templates in **tamer-dev-client** / **tamer-host** / **`t4l ios create`** do this automatically; custom `UIViewController` hosts must call it themselves.

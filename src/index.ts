@@ -28,13 +28,6 @@ declare const lynx: {
   };
 } | undefined
 
-declare const NativeModules: {
-  TamerInsetsModule?: {
-    getInsets(callback: (res: Insets) => void): void;
-    getKeyboard(callback: (res: KeyboardState) => void): void;
-  };
-} | undefined
-
 const DEFAULT_RAW_INSETS: Insets = { top: 0, right: 0, bottom: 0, left: 0 }
 const DEFAULT_INSETS: InsetsWithRaw = { ...DEFAULT_RAW_INSETS, raw: DEFAULT_RAW_INSETS }
 const DEFAULT_RAW_KEYBOARD: KeyboardState = { visible: false, height: 0, duration: 0 }

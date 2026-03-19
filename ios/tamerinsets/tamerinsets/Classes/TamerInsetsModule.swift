@@ -24,6 +24,36 @@ public final class TamerInsetsModule: NSObject, LynxModule {
 
     public static weak var shared: TamerInsetsModule?
 
+    /// Lynx root view (same role as Android `attachHostView`). Required for correct safe-area + keyboard overlap on iOS.
+    public static weak var hostView: UIView?
+    private static var safeAreaObserver: SafeAreaObserverView?
+
+    @objc public static func attachHostView(_ view: UIView?) {
+        DispatchQueue.main.async {
+            TamerInsetsModule.safeAreaObserver?.removeFromSuperview()
+            TamerInsetsModule.safeAreaObserver = nil
+            TamerInsetsModule.hostView = view
+
+            guard let host = view else {
+                TamerInsetsModule.shared?.publishCurrentInsets()
+                return
+            }
+
+            let observer = SafeAreaObserverView()
+            observer.frame = host.bounds
+            observer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            observer.isUserInteractionEnabled = false
+            observer.backgroundColor = .clear
+            host.addSubview(observer)
+            TamerInsetsModule.safeAreaObserver = observer
+
+            observer.onChange = { _ in
+                TamerInsetsModule.shared?.publishCurrentInsets()
+            }
+            TamerInsetsModule.shared?.publishCurrentInsets()
+        }
+    }
+
     @objc public static func reRequestInsets() {
         DispatchQueue.main.async {
             shared?.publishCurrentInsets()
@@ -31,7 +61,6 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     }
 
     private weak var lynxContext: LynxContext?
-    private var observerView: SafeAreaObserverView?
 
     private var lastTop: CGFloat = -1
     private var lastRight: CGFloat = -1
@@ -56,7 +85,6 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     }
 
     private func setup() {
-        attachObserverView()
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(keyboardWillShow(_:)),
                        name: UIResponder.keyboardWillShowNotification, object: nil)
@@ -64,6 +92,10 @@ public final class TamerInsetsModule: NSObject, LynxModule {
                        name: UIResponder.keyboardWillHideNotification, object: nil)
         nc.addObserver(self, selector: #selector(keyboardWillChange(_:)),
                        name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.publishCurrentInsets()
+        }
     }
 
     private func keyWindow() -> UIWindow? {
@@ -76,32 +108,26 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         return UIApplication.shared.keyWindow
     }
 
-    private func attachObserverView() {
-        guard let window = keyWindow() else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.attachObserverView()
+    private func fallbackSafeAreaInsets() -> UIEdgeInsets {
+        if let host = TamerInsetsModule.hostView {
+            let direct = host.safeAreaInsets
+            if direct.top > 0 || direct.bottom > 0 || direct.left > 0 || direct.right > 0 {
+                return direct
             }
-            return
+            if let superview = host.superview {
+                let s = superview.safeAreaInsets
+                if s.top > 0 || s.bottom > 0 || s.left > 0 || s.right > 0 { return s }
+            }
+            return direct
         }
-
-        let observer = SafeAreaObserverView()
-        observer.frame = window.bounds
-        observer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        observer.isUserInteractionEnabled = false
-        observer.backgroundColor = .clear
-        window.addSubview(observer)
-        observerView = observer
-
-        observer.onChange = { [weak self] insets in
-            self?.handleInsetsChange(insets)
+        if let root = keyWindow()?.rootViewController?.view {
+            return root.safeAreaInsets
         }
-
-        handleInsetsChange(window.safeAreaInsets)
+        return keyWindow()?.safeAreaInsets ?? .zero
     }
 
-    private func publishCurrentInsets() {
-        let window = keyWindow()
-        let insets = observerView?.safeAreaInsets ?? window?.safeAreaInsets ?? .zero
+    fileprivate func publishCurrentInsets() {
+        let insets = fallbackSafeAreaInsets()
         handleInsetsChange(insets)
     }
 
@@ -133,23 +159,32 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         handleKeyboardNotification(notification, forceVisible: nil)
     }
 
-    private func handleKeyboardNotification(_ notification: Notification, forceVisible: Bool?) {
-        guard let userInfo = notification.userInfo,
-              let endFrame = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
-
-        let windowHeight: CGFloat
-        if #available(iOS 13.0, *) {
-            windowHeight = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .flatMap { $0.windows }
-                .first { $0.isKeyWindow }?.bounds.height ?? UIScreen.main.bounds.height
-        } else {
-            windowHeight = UIScreen.main.bounds.height
+    private func keyboardOverlapHeight(endFrameScreen: CGRect) -> CGFloat {
+        if let host = TamerInsetsModule.hostView, let window = host.window {
+            let space = window.screen.coordinateSpace
+            let kbInHost = host.convert(endFrameScreen, from: space)
+            return max(0, host.bounds.intersection(kbInHost).height)
         }
 
-        let rawHeight = max(0, windowHeight - endFrame.origin.y)
-        let visible = forceVisible ?? (rawHeight > 1)
-        let height = visible ? rawHeight : 0
+        guard let window = keyWindow() else { return 0 }
+        let space = window.screen.coordinateSpace
+        let kbInWindow = window.convert(endFrameScreen, from: space)
+        return max(0, window.bounds.intersection(kbInWindow).height)
+    }
+
+    private func handleKeyboardNotification(_ notification: Notification, forceVisible: Bool?) {
+        guard let userInfo = notification.userInfo,
+              let endFrameScreen = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+
+        let overlap = keyboardOverlapHeight(endFrameScreen: endFrameScreen)
+        let visible: Bool
+        if let forced = forceVisible {
+            visible = forced && overlap > 0.5
+        } else {
+            visible = overlap > 0.5
+        }
+        let height = visible ? overlap : 0
+
         let duration = Int(((userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25) * 1000)
 
         if visible == isKeyboardVisible && height == keyboardHeight { return }
@@ -163,8 +198,7 @@ public final class TamerInsetsModule: NSObject, LynxModule {
 
     @objc func getInsets(_ callback: @escaping (Any) -> Void) {
         DispatchQueue.main.async { [weak self] in
-            let window = self?.keyWindow()
-            let insets = self?.observerView?.safeAreaInsets ?? window?.safeAreaInsets ?? .zero
+            let insets = self?.fallbackSafeAreaInsets() ?? .zero
             callback([
                 "top": insets.top,
                 "right": insets.right,
@@ -193,6 +227,16 @@ public final class TamerInsetsModule: NSObject, LynxModule {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        observerView?.removeFromSuperview()
+        let observer = TamerInsetsModule.safeAreaObserver
+        TamerInsetsModule.safeAreaObserver = nil
+        if let obs = observer {
+            if Thread.isMainThread {
+                obs.removeFromSuperview()
+            } else {
+                DispatchQueue.main.async {
+                    obs.removeFromSuperview()
+                }
+            }
+        }
     }
 }

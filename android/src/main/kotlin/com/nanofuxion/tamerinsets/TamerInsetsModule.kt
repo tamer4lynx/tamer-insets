@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.view.View
+import android.view.ViewTreeObserver
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import android.util.Log
@@ -33,7 +34,10 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
 
         fun attachHostView(view: View?) {
             if (hostView !== view) {
-                hostView?.let { ViewCompat.setOnApplyWindowInsetsListener(it, null) }
+                hostView?.let { old ->
+                    ViewCompat.setOnApplyWindowInsetsListener(old, null)
+                    instance?.removeFocusListener(old)
+                }
             }
             Log.i("TamerInsets", "attachHostView: $view (instance is ${if (instance != null) "SET" else "NULL"})")
             hostView = view
@@ -56,6 +60,8 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var focusListener: ViewTreeObserver.OnGlobalFocusChangeListener? = null
+
     private var lastTop: Int = -1
     private var lastLeft: Int = -1
     private var lastRight: Int = -1
@@ -81,8 +87,23 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         lastImeHeight = 0
     }
 
+    fun removeFocusListener(view: View) {
+        focusListener?.let { listener ->
+            if (view.viewTreeObserver.isAlive) {
+                view.viewTreeObserver.removeOnGlobalFocusChangeListener(listener)
+            }
+            focusListener = null
+        }
+    }
+
     fun setupInsetsListener(view: View) {
         resetCachedValues()
+        removeFocusListener(view)
+        focusListener = ViewTreeObserver.OnGlobalFocusChangeListener { _, _ ->
+            view.postDelayed({ Companion.reRequestInsets() }, 100)
+            view.postDelayed({ Companion.reRequestInsets() }, 250)
+        }
+        view.viewTreeObserver.addOnGlobalFocusChangeListener(focusListener)
         ViewCompat.setOnApplyWindowInsetsListener(view) { _, insets ->
             updateInsets(insets)
             updateKeyboardState(insets)
