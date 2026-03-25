@@ -70,6 +70,8 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     private var isKeyboardVisible = false
     private var keyboardHeight: CGFloat = 0
     private var keyboardDuration: Int = 0
+    private var pendingHideWorkItem: DispatchWorkItem?
+    private let hideDebounceInterval: TimeInterval = 0.08
 
     @objc public required init(param: Any) {
         super.init()
@@ -177,23 +179,49 @@ public final class TamerInsetsModule: NSObject, LynxModule {
               let endFrameScreen = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
 
         let overlap = keyboardOverlapHeight(endFrameScreen: endFrameScreen)
-        let visible: Bool
+        let safeBottom = fallbackSafeAreaInsets().bottom
+        let overlapVisible: Bool
         if let forced = forceVisible {
-            visible = forced && overlap > 0.5
+            overlapVisible = forced && overlap > 0.5
         } else {
-            visible = overlap > 0.5
+            overlapVisible = overlap > 0.5
         }
-        let height = visible ? overlap : 0
-
+        // Overlap includes the home-indicator strip; subtract so JS matches SafeArea bottom padding.
+        let heightAboveSafe = overlapVisible ? max(overlap - safeBottom, 0) : 0
+        let visible = overlapVisible && heightAboveSafe > 0.5
+        let height = visible ? heightAboveSafe : 0
         let duration = Int(((userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25) * 1000)
 
-        if visible == isKeyboardVisible && height == keyboardHeight { return }
-        isKeyboardVisible = visible
-        keyboardHeight = height
-        keyboardDuration = duration
-
-        let payload = "{\"visible\":\(visible ? "true" : "false"),\"height\":\(height),\"duration\":\(duration)}"
-        sendEvent("tamer-insets:keyboard", payload: payload)
+        if visible {
+            // Cancel any pending hide — this is a show or re-show.
+            pendingHideWorkItem?.cancel()
+            pendingHideWorkItem = nil
+            if visible == isKeyboardVisible && height == keyboardHeight { return }
+            isKeyboardVisible = visible
+            keyboardHeight = height
+            keyboardDuration = duration
+            let payload = "{\"visible\":true,\"height\":\(height),\"duration\":\(duration)}"
+            sendEvent("tamer-insets:keyboard", payload: payload)
+        } else {
+            // Debounce the hide: iOS fires keyboardWillHide → keyboardWillShow when
+            // focus moves between inputs. If a show arrives within hideDebounceInterval
+            // the hide is cancelled and JS never sees the collapsed state.
+            if !isKeyboardVisible && keyboardHeight == 0 { return }
+            pendingHideWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                self.pendingHideWorkItem = nil
+                if self.isKeyboardVisible || self.keyboardHeight > 0 {
+                    self.isKeyboardVisible = false
+                    self.keyboardHeight = 0
+                    self.keyboardDuration = duration
+                    self.sendEvent("tamer-insets:keyboard",
+                                   payload: "{\"visible\":false,\"height\":0,\"duration\":\(duration)}")
+                }
+            }
+            pendingHideWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + hideDebounceInterval, execute: work)
+        }
     }
 
     @objc func getInsets(_ callback: @escaping (Any) -> Void) {
@@ -226,6 +254,8 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     }
 
     deinit {
+        pendingHideWorkItem?.cancel()
+        pendingHideWorkItem = nil
         NotificationCenter.default.removeObserver(self)
         let observer = TamerInsetsModule.safeAreaObserver
         TamerInsetsModule.safeAreaObserver = nil

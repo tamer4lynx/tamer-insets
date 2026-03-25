@@ -34,6 +34,10 @@ function MyComponent() {
 | `useInsets()` | `InsetsWithRaw` | `{ top, right, bottom, left, raw }` — system safe area insets |
 | `useKeyboard()` | `KeyboardStateWithRaw` | `{ visible, height, duration, raw }` — keyboard visibility, height (px), and animation duration (ms) |
 
+`height` is the keyboard overlap **above** the bottom layout inset (same bottom as `useInsets()` / `<SafeArea>`: Android `max(systemBars, displayCutout)` bottom; iOS `overlap − safeArea.bottom`), so you can combine them in layout without mixing units.
+
+**JS / Lynx:** Use **numeric** lengths for keyboard offset the same way as for `insets` (e.g. `paddingBottom: insets.bottom` in `<SafeArea>`). Avoid mixing bare numbers for insets with `"Npx"` strings for keyboard — `AvoidKeyboard` uses rounded numbers to match.
+
 **Types:**
 - `Insets` — `{ top, right, bottom, left }`
 - `InsetsWithRaw` — extends Insets with `raw: Insets`
@@ -45,6 +49,8 @@ Listens to `tamer-insets:keyboard` (Android) and `keyboardstatuschanged` (iOS) e
 ## Platform
 
 Uses **lynx.ext.json**. Run `t4l link` after adding to your app. Requires `TamerInsetsModule` native module.
+
+**Android:** After the keyboard height updates, the module schedules a few delayed `reRequestInsets()` calls. Some custom ROMs (e.g. LineageOS) report IME size incorrectly on the first frames; re-reading matches what happens when you switch keyboards.
 
 ### iOS
 

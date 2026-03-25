@@ -48,7 +48,8 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
 
         fun reRequestInsets() {
             val view = hostView ?: return
-            instance?.resetCachedValues()
+            // Do NOT reset cached values here — that would cause a spurious
+            // visible=false emission before the IME insets arrive.
             view.post {
                 ViewCompat.requestApplyInsets(view)
                 ViewCompat.getRootWindowInsets(view)?.let { insets ->
@@ -69,6 +70,15 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
     private var lastImeVisible: Boolean = false
     private var lastImeHeight: Int = 0
 
+    // Pending hide: when we see visible=false while the IME was open, we delay
+    // the emission by HIDE_DEBOUNCE_MS. If a visible=true arrives within that
+    // window the hide is cancelled (handles the focus-transfer / re-open case).
+    private var pendingHideRunnable: Runnable? = null
+    private val HIDE_DEBOUNCE_MS = 80L
+
+    /** Invalidates delayed [scheduleKeyboardInsetRefresh] runs after hide or a new show. */
+    private var keyboardInsetRefreshGen: Int = 0
+
     init {
         Log.i("TamerInsets", "TamerInsetsModule init")
         instance = this
@@ -83,8 +93,8 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         lastLeft = -1
         lastRight = -1
         lastBottom = -1
-        lastImeVisible = false
-        lastImeHeight = 0
+        // Keep lastImeVisible / lastImeHeight as-is so a reRequestInsets()
+        // triggered by focus change doesn't emit a spurious hide event.
     }
 
     fun removeFocusListener(view: View) {
@@ -125,21 +135,85 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         }
     }
 
-    private fun updateKeyboardState(insets: WindowInsetsCompat) {
+    /**
+     * Same bottom inset as [updateInsets] (system bars + cutout). Single source of truth
+     * so JS `keyboard.height` composes with `useInsets().bottom` like iOS (overlap − safe bottom).
+     */
+    private fun bottomInsetForLayout(insets: WindowInsetsCompat): Int {
+        val systemBars = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars())
+        val displayCutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+        return maxOf(systemBars.bottom, displayCutout.bottom)
+    }
+
+    /**
+     * Keyboard overlap above the bottom layout inset — same units as [emitGlobalEvent] insets.
+     */
+    private fun keyboardOverlapPx(insets: WindowInsetsCompat): Int {
         val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
-        val imeHeight = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
-        val effectiveVisible = imeVisible && imeHeight > 0
-        val effectiveHeight = if (effectiveVisible) imeHeight else 0
-        if (effectiveVisible == lastImeVisible && effectiveHeight == lastImeHeight) return
-        lastImeVisible = effectiveVisible
-        lastImeHeight = effectiveHeight
-        Log.d("TamerInsets", "updateKeyboard: visible=$effectiveVisible, height=$effectiveHeight")
-        val map = JavaOnlyMap().apply {
-            putBoolean("visible", effectiveVisible)
-            putDouble("height", effectiveHeight.toDouble())
-            putDouble("duration", 0.0)
+        val imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+        if (!imeVisible || imeBottom <= 0) return 0
+        val layoutBottom = bottomInsetForLayout(insets)
+        return maxOf(imeBottom - layoutBottom, 0)
+    }
+
+    /**
+     * Some ROMs (e.g. LineageOS) report stale IME bottom on the first frames after show;
+     * switching IME forces a new inset pass and fixes layout — we mimic that by re-reading
+     * after short delays when the keyboard just became visible or its height changed.
+     */
+    private fun scheduleKeyboardInsetRefresh(gen: Int) {
+        val delaysMs = longArrayOf(60L, 180L, 400L)
+        for (delay in delaysMs) {
+            mainHandler.postDelayed({
+                if (gen != keyboardInsetRefreshGen) return@postDelayed
+                Companion.reRequestInsets()
+            }, delay)
         }
-        emitGlobalEvent("tamer-insets:keyboard", map)
+    }
+
+    private fun updateKeyboardState(insets: WindowInsetsCompat) {
+        val effectiveHeight = keyboardOverlapPx(insets)
+        val effectiveVisible = effectiveHeight > 0
+
+        if (effectiveVisible) {
+            // Cancel any pending hide and apply the open immediately.
+            pendingHideRunnable?.let { mainHandler.removeCallbacks(it) }
+            pendingHideRunnable = null
+            if (effectiveVisible == lastImeVisible && effectiveHeight == lastImeHeight) return
+            lastImeVisible = effectiveVisible
+            lastImeHeight = effectiveHeight
+            val refreshGen = ++keyboardInsetRefreshGen
+            Log.d("TamerInsets", "updateKeyboard: visible=true, height=$effectiveHeight")
+            val map = JavaOnlyMap().apply {
+                putBoolean("visible", true)
+                putDouble("height", effectiveHeight.toDouble())
+                putDouble("duration", 0.0)
+            }
+            emitGlobalEvent("tamer-insets:keyboard", map)
+            scheduleKeyboardInsetRefresh(refreshGen)
+        } else {
+            // Debounce the hide so a rapid hide→show (focus transfer / re-open)
+            // doesn't flash the layout into the collapsed state.
+            if (!lastImeVisible && lastImeHeight == 0) return  // already hidden
+            pendingHideRunnable?.let { mainHandler.removeCallbacks(it) }
+            val runnable = Runnable {
+                pendingHideRunnable = null
+                if (lastImeVisible || lastImeHeight > 0) {
+                    keyboardInsetRefreshGen++
+                    lastImeVisible = false
+                    lastImeHeight = 0
+                    Log.d("TamerInsets", "updateKeyboard: visible=false (debounced)")
+                    val map = JavaOnlyMap().apply {
+                        putBoolean("visible", false)
+                        putDouble("height", 0.0)
+                        putDouble("duration", 0.0)
+                    }
+                    emitGlobalEvent("tamer-insets:keyboard", map)
+                }
+            }
+            pendingHideRunnable = runnable
+            mainHandler.postDelayed(runnable, HIDE_DEBOUNCE_MS)
+        }
     }
 
     private fun updateInsets(insets: WindowInsetsCompat) {

@@ -116,38 +116,76 @@ function fromLynxKeyboardEvent(evOrIsShow: unknown, heightArg?: unknown): Keyboa
   return { visible, height: visible ? height : 0, duration: 250 }
 }
 
+let keyboardShared: KeyboardStateWithRaw = DEFAULT_KEYBOARD
+const keyboardSubscribers = new Set<() => void>()
+
+function setKeyboardShared(next: KeyboardStateWithRaw) {
+  keyboardShared = next
+  keyboardSubscribers.forEach((fn) => {
+    fn()
+  })
+}
+
+function subscribeKeyboard(onChange: () => void) {
+  keyboardSubscribers.add(onChange)
+  return () => {
+    keyboardSubscribers.delete(onChange)
+  }
+}
+
+let keyboardBridgeAttached = false
+
+function hasTamerInsetsKeyboard(): boolean {
+  try {
+    return typeof NativeModules?.TamerInsetsModule?.getKeyboard === 'function'
+  } catch {
+    return false
+  }
+}
+
+function attachKeyboardBridgeOnce() {
+  if (keyboardBridgeAttached) return
+  keyboardBridgeAttached = true
+
+  const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined
+  const lynxFallback = !hasTamerInsetsKeyboard()
+
+  const handleTamerKeyboard = (event: EventPayload<KeyboardState>) => {
+    try {
+      const nextKeyboard = parsePayload(event)
+      if (nextKeyboard && typeof nextKeyboard.visible === 'boolean') {
+        setKeyboardShared(toKeyboard(nextKeyboard))
+      }
+    } catch (_) {}
+  }
+
+  const handleLynxKeyboard = (evOrIsShow: unknown, heightArg?: unknown) => {
+    const next = fromLynxKeyboardEvent(evOrIsShow, heightArg)
+    if (next) setKeyboardShared(toKeyboard(next))
+  }
+
+  bridge?.addListener?.('tamer-insets:keyboard', handleTamerKeyboard)
+  if (lynxFallback) {
+    bridge?.addListener?.('keyboardstatuschanged', handleLynxKeyboard)
+  }
+
+  try {
+    NativeModules?.TamerInsetsModule?.getKeyboard?.((res: any) => {
+      const data = parsePayload<KeyboardState>(res)
+      if (data && typeof data.visible === 'boolean') setKeyboardShared(toKeyboard(data))
+    })
+  } catch (_) {}
+}
+
 export function useKeyboard() {
-  const [keyboard, setKeyboard] = useState<KeyboardStateWithRaw>(DEFAULT_KEYBOARD)
+  const [keyboard, setKeyboard] = useState<KeyboardStateWithRaw>(() => keyboardShared)
 
   useEffect(() => {
-    const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined
-
-    const handleTamerKeyboard = (event: EventPayload<KeyboardState>) => {
-      try {
-        const nextKeyboard = parsePayload(event)
-        if (nextKeyboard && typeof nextKeyboard.visible === 'boolean') setKeyboard(toKeyboard(nextKeyboard))
-      } catch (_) {}
-    }
-
-    const handleLynxKeyboard = (evOrIsShow: unknown, heightArg?: unknown) => {
-      const next = fromLynxKeyboardEvent(evOrIsShow, heightArg)
-      if (next) setKeyboard(toKeyboard(next))
-    }
-
-    bridge?.addListener?.('tamer-insets:keyboard', handleTamerKeyboard)
-    bridge?.addListener?.('keyboardstatuschanged', handleLynxKeyboard)
-
-    try {
-      NativeModules?.TamerInsetsModule?.getKeyboard?.((res: any) => {
-        const data = parsePayload<KeyboardState>(res)
-        if (data && typeof data.visible === 'boolean') setKeyboard(toKeyboard(data))
-      })
-    } catch (_) {}
-
-    return () => {
-      bridge?.removeListener?.('tamer-insets:keyboard', handleTamerKeyboard)
-      bridge?.removeListener?.('keyboardstatuschanged', handleLynxKeyboard)
-    }
+    attachKeyboardBridgeOnce()
+    setKeyboard(keyboardShared)
+    return subscribeKeyboard(() => {
+      setKeyboard(keyboardShared)
+    })
   }, [])
 
   return keyboard
