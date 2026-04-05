@@ -89,37 +89,70 @@ function fromLynxKeyboardEvent(evOrIsShow, heightArg) {
     const visible = isShow === 'on' || isShow === true;
     return { visible, height: visible ? height : 0, duration: 250 };
 }
-export function useKeyboard() {
-    const [keyboard, setKeyboard] = useState(DEFAULT_KEYBOARD);
-    useEffect(() => {
-        const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined;
-        const handleTamerKeyboard = (event) => {
-            try {
-                const nextKeyboard = parsePayload(event);
-                if (nextKeyboard && typeof nextKeyboard.visible === 'boolean')
-                    setKeyboard(toKeyboard(nextKeyboard));
-            }
-            catch (_) { }
-        };
-        const handleLynxKeyboard = (evOrIsShow, heightArg) => {
-            const next = fromLynxKeyboardEvent(evOrIsShow, heightArg);
-            if (next)
-                setKeyboard(toKeyboard(next));
-        };
-        bridge?.addListener?.('tamer-insets:keyboard', handleTamerKeyboard);
-        bridge?.addListener?.('keyboardstatuschanged', handleLynxKeyboard);
+let keyboardShared = DEFAULT_KEYBOARD;
+const keyboardSubscribers = new Set();
+function setKeyboardShared(next) {
+    keyboardShared = next;
+    keyboardSubscribers.forEach((fn) => {
+        fn();
+    });
+}
+function subscribeKeyboard(onChange) {
+    keyboardSubscribers.add(onChange);
+    return () => {
+        keyboardSubscribers.delete(onChange);
+    };
+}
+let keyboardBridgeAttached = false;
+function hasTamerInsetsKeyboard() {
+    try {
+        return typeof NativeModules?.TamerInsetsModule?.getKeyboard === 'function';
+    }
+    catch {
+        return false;
+    }
+}
+function attachKeyboardBridgeOnce() {
+    if (keyboardBridgeAttached)
+        return;
+    keyboardBridgeAttached = true;
+    const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined;
+    const lynxFallback = !hasTamerInsetsKeyboard();
+    const handleTamerKeyboard = (event) => {
         try {
-            NativeModules?.TamerInsetsModule?.getKeyboard?.((res) => {
-                const data = parsePayload(res);
-                if (data && typeof data.visible === 'boolean')
-                    setKeyboard(toKeyboard(data));
-            });
+            const nextKeyboard = parsePayload(event);
+            if (nextKeyboard && typeof nextKeyboard.visible === 'boolean') {
+                setKeyboardShared(toKeyboard(nextKeyboard));
+            }
         }
         catch (_) { }
-        return () => {
-            bridge?.removeListener?.('tamer-insets:keyboard', handleTamerKeyboard);
-            bridge?.removeListener?.('keyboardstatuschanged', handleLynxKeyboard);
-        };
+    };
+    const handleLynxKeyboard = (evOrIsShow, heightArg) => {
+        const next = fromLynxKeyboardEvent(evOrIsShow, heightArg);
+        if (next)
+            setKeyboardShared(toKeyboard(next));
+    };
+    bridge?.addListener?.('tamer-insets:keyboard', handleTamerKeyboard);
+    if (lynxFallback) {
+        bridge?.addListener?.('keyboardstatuschanged', handleLynxKeyboard);
+    }
+    try {
+        NativeModules?.TamerInsetsModule?.getKeyboard?.((res) => {
+            const data = parsePayload(res);
+            if (data && typeof data.visible === 'boolean')
+                setKeyboardShared(toKeyboard(data));
+        });
+    }
+    catch (_) { }
+}
+export function useKeyboard() {
+    const [keyboard, setKeyboard] = useState(() => keyboardShared);
+    useEffect(() => {
+        attachKeyboardBridgeOnce();
+        setKeyboard(keyboardShared);
+        return subscribeKeyboard(() => {
+            setKeyboard(keyboardShared);
+        });
     }, []);
     return keyboard;
 }
