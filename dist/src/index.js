@@ -37,30 +37,76 @@ function parsePayload(event) {
     }
     return event;
 }
-export function useInsets() {
-    const [insets, setInsets] = useState(DEFAULT_INSETS);
-    useEffect(() => {
-        const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined;
-        const handleInsetsChange = (event) => {
-            try {
-                const nextInsets = parsePayload(event);
-                if (nextInsets && typeof nextInsets.top === 'number')
-                    setInsets(toInsets(nextInsets));
-            }
-            catch (_) { }
-        };
-        bridge?.addListener?.('tamer-insets:change', handleInsetsChange);
+export const TAMER_INSETS_SNAPSHOT_GLOBAL_KEY = '__tamerInsetsSnapshot';
+function readInsetsSnapshotFromGlobal() {
+    try {
+        const g = globalThis;
+        const v = g[TAMER_INSETS_SNAPSHOT_GLOBAL_KEY];
+        if (v != null &&
+            typeof v === 'object' &&
+            !Array.isArray(v) &&
+            typeof v.top === 'number' &&
+            typeof v.raw === 'object') {
+            return v;
+        }
+    }
+    catch (_) { }
+    return null;
+}
+let insetsShared = readInsetsSnapshotFromGlobal() ?? DEFAULT_INSETS;
+const insetsSubscribers = new Set();
+function setInsetsShared(next) {
+    insetsShared = next;
+    try {
+        globalThis[TAMER_INSETS_SNAPSHOT_GLOBAL_KEY] = next;
+    }
+    catch (_) { }
+    insetsSubscribers.forEach((fn) => {
+        fn();
+    });
+}
+function subscribeInsets(onChange) {
+    insetsSubscribers.add(onChange);
+    return () => {
+        insetsSubscribers.delete(onChange);
+    };
+}
+let insetsBridgeAttached = false;
+function attachInsetsBridgeOnce() {
+    if (insetsBridgeAttached)
+        return;
+    insetsBridgeAttached = true;
+    const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined;
+    const handleInsetsChange = (event) => {
         try {
-            NativeModules?.TamerInsetsModule?.getInsets?.((res) => {
-                const data = parsePayload(res);
-                if (data && typeof data.top === 'number')
-                    setInsets(toInsets(data));
-            });
+            const nextInsets = parsePayload(event);
+            if (nextInsets && typeof nextInsets.top === 'number')
+                setInsetsShared(toInsets(nextInsets));
         }
         catch (_) { }
-        return () => {
-            bridge?.removeListener?.('tamer-insets:change', handleInsetsChange);
-        };
+    };
+    bridge?.addListener?.('tamer-insets:change', handleInsetsChange);
+    try {
+        NativeModules?.TamerInsetsModule?.getInsets?.((res) => {
+            const data = parsePayload(res);
+            if (data && typeof data.top === 'number')
+                setInsetsShared(toInsets(data));
+        });
+    }
+    catch (_) { }
+}
+/** Prime the shared insets cache (e.g. from native before first React paint). */
+export function seedTamerInsets(raw) {
+    setInsetsShared(toInsets(raw));
+}
+export function useInsets() {
+    const [insets, setInsets] = useState(() => insetsShared);
+    useEffect(() => {
+        attachInsetsBridgeOnce();
+        setInsets(insetsShared);
+        return subscribeInsets(() => {
+            setInsets(insetsShared);
+        });
     }, []);
     return insets;
 }

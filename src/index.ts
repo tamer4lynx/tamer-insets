@@ -66,31 +66,84 @@ function parsePayload<T>(event: EventPayload<T> | string): T | null {
   return event as T
 }
 
+export const TAMER_INSETS_SNAPSHOT_GLOBAL_KEY = '__tamerInsetsSnapshot'
+
+function readInsetsSnapshotFromGlobal(): InsetsWithRaw | null {
+  try {
+    const g = globalThis as Record<string, unknown>
+    const v = g[TAMER_INSETS_SNAPSHOT_GLOBAL_KEY]
+    if (
+      v != null &&
+      typeof v === 'object' &&
+      !Array.isArray(v) &&
+      typeof (v as InsetsWithRaw).top === 'number' &&
+      typeof (v as InsetsWithRaw).raw === 'object'
+    ) {
+      return v as InsetsWithRaw
+    }
+  } catch (_) {}
+  return null
+}
+
+let insetsShared: InsetsWithRaw = readInsetsSnapshotFromGlobal() ?? DEFAULT_INSETS
+const insetsSubscribers = new Set<() => void>()
+
+function setInsetsShared(next: InsetsWithRaw) {
+  insetsShared = next
+  try {
+    (globalThis as Record<string, unknown>)[TAMER_INSETS_SNAPSHOT_GLOBAL_KEY] = next
+  } catch (_) {}
+  insetsSubscribers.forEach((fn) => {
+    fn()
+  })
+}
+
+function subscribeInsets(onChange: () => void) {
+  insetsSubscribers.add(onChange)
+  return () => {
+    insetsSubscribers.delete(onChange)
+  }
+}
+
+let insetsBridgeAttached = false
+
+function attachInsetsBridgeOnce() {
+  if (insetsBridgeAttached) return
+  insetsBridgeAttached = true
+
+  const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined
+
+  const handleInsetsChange = (event: EventPayload<Insets>) => {
+    try {
+      const nextInsets = parsePayload(event)
+      if (nextInsets && typeof nextInsets.top === 'number') setInsetsShared(toInsets(nextInsets))
+    } catch (_) {}
+  }
+
+  bridge?.addListener?.('tamer-insets:change', handleInsetsChange)
+
+  try {
+    NativeModules?.TamerInsetsModule?.getInsets?.((res: any) => {
+      const data = parsePayload<Insets>(res)
+      if (data && typeof data.top === 'number') setInsetsShared(toInsets(data))
+    })
+  } catch (_) {}
+}
+
+/** Prime the shared insets cache (e.g. from native before first React paint). */
+export function seedTamerInsets(raw: Insets): void {
+  setInsetsShared(toInsets(raw))
+}
+
 export function useInsets() {
-  const [insets, setInsets] = useState<InsetsWithRaw>(DEFAULT_INSETS)
+  const [insets, setInsets] = useState<InsetsWithRaw>(() => insetsShared)
 
   useEffect(() => {
-    const bridge = typeof lynx !== 'undefined' ? lynx?.getJSModule?.('GlobalEventEmitter') : undefined
-
-    const handleInsetsChange = (event: EventPayload<Insets>) => {
-      try {
-        const nextInsets = parsePayload(event)
-        if (nextInsets && typeof nextInsets.top === 'number') setInsets(toInsets(nextInsets))
-      } catch (_) {}
-    }
-
-    bridge?.addListener?.('tamer-insets:change', handleInsetsChange)
-
-    try {
-      NativeModules?.TamerInsetsModule?.getInsets?.((res: any) => {
-        const data = parsePayload<Insets>(res)
-        if (data && typeof data.top === 'number') setInsets(toInsets(data))
-      })
-    } catch (_) {}
-
-    return () => {
-      bridge?.removeListener?.('tamer-insets:change', handleInsetsChange)
-    }
+    attachInsetsBridgeOnce()
+    setInsets(insetsShared)
+    return subscribeInsets(() => {
+      setInsets(insetsShared)
+    })
   }, [])
 
   return insets
