@@ -89,8 +89,14 @@ function attachInsetsBridgeOnce() {
     try {
         NativeModules?.TamerInsetsModule?.getInsets?.((res) => {
             const data = parsePayload(res);
-            if (data && typeof data.top === 'number')
-                setInsetsShared(toInsets(data));
+            if (!data || typeof data.top !== 'number')
+                return;
+            // Ignore all-zero responses that happen when native reads insets before the
+            // host view has been laid out; the subsequent `tamer-insets:change` bridge
+            // event will deliver real values.
+            if (!data.top && !data.bottom && !data.left && !data.right)
+                return;
+            setInsetsShared(toInsets(data));
         });
     }
     catch (_) { }
@@ -185,8 +191,14 @@ function attachKeyboardBridgeOnce() {
     try {
         NativeModules?.TamerInsetsModule?.getKeyboard?.((res) => {
             const data = parsePayload(res);
-            if (data && typeof data.visible === 'boolean')
-                setKeyboardShared(toKeyboard(data));
+            if (!data || typeof data.visible !== 'boolean')
+                return;
+            // Don't overwrite with default `{visible:false,height:0}`: initial state is
+            // already that, and letting it through discards any bridge event that raced
+            // before this callback settled.
+            if (!data.visible && !data.height)
+                return;
+            setKeyboardShared(toKeyboard(data));
         });
     }
     catch (_) { }

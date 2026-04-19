@@ -34,6 +34,9 @@ public final class TamerInsetsModule: NSObject, LynxModule {
             TamerInsetsModule.safeAreaObserver = nil
             TamerInsetsModule.hostView = view
 
+            // Reset per-instance cache so next publish always emits (mirrors Android resetCachedValues).
+            TamerInsetsModule.shared?.resetInsetsCache()
+
             guard let host = view else {
                 TamerInsetsModule.shared?.publishCurrentInsets()
                 return
@@ -52,6 +55,13 @@ public final class TamerInsetsModule: NSObject, LynxModule {
             }
             TamerInsetsModule.shared?.publishCurrentInsets()
         }
+    }
+
+    fileprivate func resetInsetsCache() {
+        lastTop = -1
+        lastRight = -1
+        lastBottom = -1
+        lastLeft = -1
     }
 
     @objc public static func reRequestInsets() {
@@ -149,15 +159,25 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         sendEvent("tamer-insets:change", payload: payload)
     }
 
+    private func isActiveInstance() -> Bool {
+        if let lv = TamerInsetsModule.hostView as? LynxView {
+            return lv.getLynxContext() === self.lynxContext
+        }
+        return TamerInsetsModule.shared === self
+    }
+
     @objc private func keyboardWillShow(_ notification: Notification) {
+        guard isActiveInstance() else { return }
         handleKeyboardNotification(notification, forceVisible: true)
     }
 
     @objc private func keyboardWillHide(_ notification: Notification) {
+        guard isActiveInstance() else { return }
         handleKeyboardNotification(notification, forceVisible: false)
     }
 
     @objc private func keyboardWillChange(_ notification: Notification) {
+        guard isActiveInstance() else { return }
         handleKeyboardNotification(notification, forceVisible: nil)
     }
 
@@ -180,6 +200,13 @@ public final class TamerInsetsModule: NSObject, LynxModule {
 
         let overlap = keyboardOverlapHeight(endFrameScreen: endFrameScreen)
         let safeBottom = fallbackSafeAreaInsets().bottom
+        NSLog("[TamerInsets] kb notif=%@ endScreen=%@ overlap=%0.2f safeBottom=%0.2f host=%@ hostWindow=%@",
+              notification.name.rawValue,
+              NSCoder.string(for: endFrameScreen),
+              overlap,
+              safeBottom,
+              TamerInsetsModule.hostView.map { "\($0)" } ?? "nil",
+              (TamerInsetsModule.hostView?.window).map { "\($0)" } ?? "nil")
         let overlapVisible: Bool
         if let forced = forceVisible {
             overlapVisible = forced && overlap > 0.5
@@ -248,8 +275,16 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     private func sendEvent(_ name: String, payload: String) {
         let params: [[String: Any]] = [["payload": payload]]
         DispatchQueue.main.async { [weak self] in
-            guard let ctx = self?.lynxContext ?? TamerInsetsModule.shared?.lynxContext else { return }
-            ctx.sendGlobalEvent(name, withParams: params)
+            // Prefer the LynxContext bound to the currently attached host LynxView so the event
+            // lands on the active JS runtime even if multiple TamerInsetsModule instances exist
+            // (e.g. dev-launcher + project bundles). Mirrors Android TamerInsetsModule.emitGlobalEvent.
+            let ctx: LynxContext? = {
+                if let lv = TamerInsetsModule.hostView as? LynxView {
+                    return lv.getLynxContext()
+                }
+                return self?.lynxContext ?? TamerInsetsModule.shared?.lynxContext
+            }()
+            ctx?.sendGlobalEvent(name, withParams: params)
         }
     }
 
