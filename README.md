@@ -2,6 +2,8 @@
 
 Hooks for system insets and keyboard state in Lynx.
 
+**Inset math (Android):** `TamerInsetsModule` matches the **root** window inset extraction in [`react-native-safe-area-context` `SafeAreaUtils`](https://github.com/th3rdwave/react-native-safe-area-context) (API 30+ combined `statusBars | displayCutout | navigationBars | captionBar`; API 23–29 `min(systemBottom, stableBottom)` for the bottom edge; pre-23 visible display frame). *Expo* `expo-status-bar` / `expo-navigation-bar` do **not** provide layout pixel heights; they point at safe-area insets for dimensions.
+
 ## Installation
 
 ```bash
@@ -34,7 +36,7 @@ function MyComponent() {
 | `useInsets()` | `InsetsWithRaw` | `{ top, right, bottom, left, raw }` — system safe area insets |
 | `useKeyboard()` | `KeyboardStateWithRaw` | `{ visible, height, duration, raw }` — keyboard visibility, height (px), and animation duration (ms) |
 
-`height` is the keyboard overlap **above** the bottom layout inset (same bottom as `useInsets()` / `<SafeArea>`: Android `max(systemBars, displayCutout)` bottom; iOS `overlap − safeArea.bottom`), so you can combine them in layout without mixing units.
+`height` is the keyboard overlap **above** the bottom layout inset (same bottom as `useInsets()` / `<SafeArea>`: Android same root inset model as RN safe-area-context; iOS `overlap − safeArea.bottom`), so you can combine them in layout without mixing units.
 
 **JS / Lynx:** Use **numeric** lengths for keyboard offset the same way as for `insets` (e.g. `paddingBottom: insets.bottom` in `<SafeArea>`). Avoid mixing bare numbers for insets with `"Npx"` strings for keyboard — `AvoidKeyboard` uses rounded numbers to match.
 

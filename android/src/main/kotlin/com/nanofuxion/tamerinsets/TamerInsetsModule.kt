@@ -1,6 +1,8 @@
 package com.nanofuxion.tamerinsets
 
 import android.content.Context
+import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.View
@@ -8,6 +10,7 @@ import android.view.ViewTreeObserver
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import android.util.Log
+import kotlin.math.min
 import com.lynx.jsbridge.LynxMethod
 import com.lynx.jsbridge.LynxModule
 import com.lynx.react.bridge.Callback
@@ -16,7 +19,7 @@ import com.lynx.react.bridge.JavaOnlyMap
 import com.lynx.tasm.behavior.LynxContext
 import org.json.JSONObject
 
-class TamerInsetsModule(context: Context) : LynxModule(context) {
+class TamerInsetsModule(private val appContext: Context) : LynxModule(appContext) {
     data class InsetsState(
         val top: Int,
         val left: Int,
@@ -60,6 +63,7 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         }
     }
 
+    private val density: Double get() = appContext.resources.displayMetrics.density.toDouble()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var focusListener: ViewTreeObserver.OnGlobalFocusChangeListener? = null
 
@@ -136,13 +140,55 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
     }
 
     /**
-     * Same bottom inset as [updateInsets] (system bars + cutout). Single source of truth
-     * so JS `keyboard.height` composes with `useInsets().bottom` like iOS (overlap − safe bottom).
+     * Root layout insets aligned with `react-native-safe-area-context` [SafeAreaUtils]:
+     * - API 30+: single [WindowInsetsCompat.getInsets] with
+     *   statusBars | displayCutout | navigationBars | captionBar
+     * - API 23–29: system window insets; bottom = min(systemWindowInsetBottom, stableInsetBottom)
+     *   (avoids treating IME as nav inset)
+     * - Below API 23: [View.getWindowVisibleDisplayFrame] on [rootView] (same as RN base path)
+     */
+    private fun layoutInsetsForHost(insets: WindowInsetsCompat, rootView: View?): InsetsState {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val typeMask =
+                WindowInsetsCompat.Type.statusBars() or
+                    WindowInsetsCompat.Type.displayCutout() or
+                    WindowInsetsCompat.Type.navigationBars() or
+                    WindowInsetsCompat.Type.captionBar()
+            val ins = insets.getInsets(typeMask)
+            return InsetsState(ins.top, ins.left, ins.right, ins.bottom)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            @Suppress("DEPRECATION")
+            val bottom = min(
+                insets.systemWindowInsetBottom,
+                insets.stableInsetBottom,
+            )
+            @Suppress("DEPRECATION")
+            return InsetsState(
+                insets.systemWindowInsetTop,
+                insets.systemWindowInsetLeft,
+                insets.systemWindowInsetRight,
+                bottom,
+            )
+        }
+        val rv = rootView ?: return InsetsState(0, 0, 0, 0)
+        val visibleRect = Rect()
+        rv.getWindowVisibleDisplayFrame(visibleRect)
+        return InsetsState(
+            visibleRect.top,
+            visibleRect.left,
+            rv.width - visibleRect.right,
+            rv.height - visibleRect.bottom,
+        )
+    }
+
+    /**
+     * Same bottom inset as [updateInsets]. Single source of truth so JS `keyboard.height` composes
+     * with `useInsets().bottom` like iOS (overlap − safe bottom).
      */
     private fun bottomInsetForLayout(insets: WindowInsetsCompat): Int {
-        val systemBars = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars())
-        val displayCutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
-        return maxOf(systemBars.bottom, displayCutout.bottom)
+        val root = hostView?.rootView ?: hostView
+        return layoutInsetsForHost(insets, root).bottom
     }
 
     /**
@@ -186,7 +232,7 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
             Log.d("TamerInsets", "updateKeyboard: visible=true, height=$effectiveHeight")
             val map = JavaOnlyMap().apply {
                 putBoolean("visible", true)
-                putDouble("height", effectiveHeight.toDouble())
+                putDouble("height", effectiveHeight / density)
                 putDouble("duration", 0.0)
             }
             emitGlobalEvent("tamer-insets:keyboard", map)
@@ -217,12 +263,12 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
     }
 
     private fun updateInsets(insets: WindowInsetsCompat) {
-        val systemBars = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars())
-        val displayCutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
-        val top = maxOf(systemBars.top, displayCutout.top)
-        val left = maxOf(systemBars.left, displayCutout.left)
-        val right = maxOf(systemBars.right, displayCutout.right)
-        val bottom = maxOf(systemBars.bottom, displayCutout.bottom)
+        val root = hostView?.rootView ?: hostView
+        val state = layoutInsetsForHost(insets, root)
+        val top = state.top
+        val left = state.left
+        val right = state.right
+        val bottom = state.bottom
         if (top == lastTop && left == lastLeft && right == lastRight && bottom == lastBottom) return
         lastTop = top
         lastLeft = left
@@ -230,10 +276,10 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         lastBottom = bottom
         Log.d("TamerInsets", "updateInsets: top=$top, bottom=$bottom, left=$left, right=$right")
         val map = JavaOnlyMap().apply {
-            putDouble("top", top.toDouble())
-            putDouble("left", left.toDouble())
-            putDouble("right", right.toDouble())
-            putDouble("bottom", bottom.toDouble())
+            putDouble("top", top / density)
+            putDouble("left", left / density)
+            putDouble("right", right / density)
+            putDouble("bottom", bottom / density)
         }
         emitGlobalEvent("tamer-insets:change", map)
     }
@@ -266,10 +312,10 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
 
     private fun currentInsetsMap(): JavaOnlyMap {
         return JavaOnlyMap().apply {
-            putDouble("top", lastTop.coerceAtLeast(0).toDouble())
-            putDouble("left", lastLeft.coerceAtLeast(0).toDouble())
-            putDouble("right", lastRight.coerceAtLeast(0).toDouble())
-            putDouble("bottom", lastBottom.coerceAtLeast(0).toDouble())
+            putDouble("top", lastTop.coerceAtLeast(0) / density)
+            putDouble("left", lastLeft.coerceAtLeast(0) / density)
+            putDouble("right", lastRight.coerceAtLeast(0) / density)
+            putDouble("bottom", lastBottom.coerceAtLeast(0) / density)
         }
     }
 
@@ -278,7 +324,7 @@ class TamerInsetsModule(context: Context) : LynxModule(context) {
         val height = if (visible) lastImeHeight else 0
         return JavaOnlyMap().apply {
             putBoolean("visible", visible)
-            putDouble("height", height.toDouble())
+            putDouble("height", height / density)
             putDouble("duration", 0.0)
         }
     }
