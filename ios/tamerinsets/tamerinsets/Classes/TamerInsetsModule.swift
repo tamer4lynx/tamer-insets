@@ -293,7 +293,7 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         }
         // Overlap includes the home-indicator strip; subtract so JS matches SafeArea bottom padding.
         let heightAboveSafe = overlapVisible ? max(overlap - safeBottom, 0) : 0
-        let visible = overlapVisible && heightAboveSafe > 0.5
+        let visible = overlapVisible && heightAboveSafe > 0
         let height = visible ? heightAboveSafe : 0
         let duration = Int(((userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25) * 1000)
 
