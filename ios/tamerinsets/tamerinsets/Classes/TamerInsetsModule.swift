@@ -23,10 +23,25 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     }
 
     public static weak var shared: TamerInsetsModule?
+    private static let instancesLock = NSLock()
+    private static let instances = NSHashTable<TamerInsetsModule>.weakObjects()
 
     /// Lynx root view (same role as Android `attachHostView`). Required for correct safe-area + keyboard overlap on iOS.
     public static weak var hostView: UIView?
     private static var safeAreaObserver: SafeAreaObserverView?
+
+    private static func registerInstance(_ instance: TamerInsetsModule) {
+        instancesLock.lock()
+        instances.add(instance)
+        instancesLock.unlock()
+    }
+
+    private static func liveInstances() -> [TamerInsetsModule] {
+        instancesLock.lock()
+        let all = instances.allObjects
+        instancesLock.unlock()
+        return all
+    }
 
     @objc public static func attachHostView(_ view: UIView?) {
         DispatchQueue.main.async {
@@ -34,11 +49,11 @@ public final class TamerInsetsModule: NSObject, LynxModule {
             TamerInsetsModule.safeAreaObserver = nil
             TamerInsetsModule.hostView = view
 
-            // Reset per-instance cache so next publish always emits (mirrors Android resetCachedValues).
-            TamerInsetsModule.shared?.resetInsetsCache()
+            // Reset per-instance caches so next publish always emits to each active Lynx runtime.
+            TamerInsetsModule.liveInstances().forEach { $0.resetInsetsCache() }
 
             guard let host = view else {
-                TamerInsetsModule.shared?.publishCurrentInsets()
+                TamerInsetsModule.liveInstances().forEach { $0.publishCurrentInsets() }
                 return
             }
 
@@ -51,9 +66,9 @@ public final class TamerInsetsModule: NSObject, LynxModule {
             TamerInsetsModule.safeAreaObserver = observer
 
             observer.onChange = { _ in
-                TamerInsetsModule.shared?.publishCurrentInsets()
+                TamerInsetsModule.liveInstances().forEach { $0.publishCurrentInsets() }
             }
-            TamerInsetsModule.shared?.publishCurrentInsets()
+            TamerInsetsModule.liveInstances().forEach { $0.publishCurrentInsets() }
         }
     }
 
@@ -66,7 +81,7 @@ public final class TamerInsetsModule: NSObject, LynxModule {
 
     @objc public static func reRequestInsets() {
         DispatchQueue.main.async {
-            shared?.publishCurrentInsets()
+            liveInstances().forEach { $0.publishCurrentInsets() }
         }
     }
 
@@ -87,12 +102,14 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         super.init()
         lynxContext = param as? LynxContext
         TamerInsetsModule.shared = self
+        TamerInsetsModule.registerInstance(self)
         DispatchQueue.main.async { [weak self] in self?.setup() }
     }
 
     @objc public override init() {
         super.init()
         TamerInsetsModule.shared = self
+        TamerInsetsModule.registerInstance(self)
         DispatchQueue.main.async { [weak self] in self?.setup() }
     }
 
@@ -159,25 +176,15 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         sendEvent("tamer-insets:change", payload: payload)
     }
 
-    private func isActiveInstance() -> Bool {
-        if let lv = TamerInsetsModule.hostView as? LynxView {
-            return lv.getLynxContext() === self.lynxContext
-        }
-        return TamerInsetsModule.shared === self
-    }
-
     @objc private func keyboardWillShow(_ notification: Notification) {
-        guard isActiveInstance() else { return }
         handleKeyboardNotification(notification, forceVisible: true)
     }
 
     @objc private func keyboardWillHide(_ notification: Notification) {
-        guard isActiveInstance() else { return }
         handleKeyboardNotification(notification, forceVisible: false)
     }
 
     @objc private func keyboardWillChange(_ notification: Notification) {
-        guard isActiveInstance() else { return }
         handleKeyboardNotification(notification, forceVisible: nil)
     }
 
@@ -275,15 +282,7 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     private func sendEvent(_ name: String, payload: String) {
         let params: [[String: Any]] = [["payload": payload]]
         DispatchQueue.main.async { [weak self] in
-            // Prefer the LynxContext bound to the currently attached host LynxView so the event
-            // lands on the active JS runtime even if multiple TamerInsetsModule instances exist
-            // (e.g. dev-launcher + project bundles). Mirrors Android TamerInsetsModule.emitGlobalEvent.
-            let ctx: LynxContext? = {
-                if let lv = TamerInsetsModule.hostView as? LynxView {
-                    return lv.getLynxContext()
-                }
-                return self?.lynxContext ?? TamerInsetsModule.shared?.lynxContext
-            }()
+            let ctx = self?.lynxContext ?? TamerInsetsModule.shared?.lynxContext
             ctx?.sendGlobalEvent(name, withParams: params)
         }
     }
