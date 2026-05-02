@@ -73,6 +73,8 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     }
 
     fileprivate func resetInsetsCache() {
+        deferredInsetDecreaseWorkItem?.cancel()
+        deferredInsetDecreaseWorkItem = nil
         lastTop = -1
         lastRight = -1
         lastBottom = -1
@@ -83,6 +85,45 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         DispatchQueue.main.async {
             liveInstances().forEach { $0.publishCurrentInsets() }
         }
+    }
+
+    private static func staticKeyWindow() -> UIWindow? {
+        if #available(iOS 13.0, *) {
+            return UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap { $0.windows }
+                .first { $0.isKeyWindow }
+        }
+        return UIApplication.shared.keyWindow
+    }
+
+    /// Live read of the merged safe-area insets (host view + key window per edge max).
+    /// Returns `nil` only when neither window nor host view is available yet.
+    @objc public static func currentInsets() -> NSValue? {
+        let windowInsets = staticKeyWindow()?.safeAreaInsets ?? .zero
+        if let host = TamerInsetsModule.hostView {
+            let h = host.safeAreaInsets
+            let merged = UIEdgeInsets(
+                top: max(h.top, windowInsets.top),
+                left: max(h.left, windowInsets.left),
+                bottom: max(h.bottom, windowInsets.bottom),
+                right: max(h.right, windowInsets.right)
+            )
+            return NSValue(uiEdgeInsets: merged)
+        }
+        if staticKeyWindow() == nil {
+            return nil
+        }
+        return NSValue(uiEdgeInsets: windowInsets)
+    }
+
+    /// JSON dictionary for embedding in Lynx `initialData` so the JS bundle reads
+    /// real insets on its very first render rather than starting at zero and
+    /// snapping when `tamer-insets:change` arrives 50–150 ms later.
+    @objc public static func currentInsetsSnapshotJson() -> String? {
+        guard let value = currentInsets() else { return nil }
+        let i = value.uiEdgeInsetsValue
+        return "{\"top\":\(i.top),\"right\":\(i.right),\"bottom\":\(i.bottom),\"left\":\(i.left)}"
     }
 
     private weak var lynxContext: LynxContext?
@@ -97,6 +138,12 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     private var keyboardDuration: Int = 0
     private var pendingHideWorkItem: DispatchWorkItem?
     private let hideDebounceInterval: TimeInterval = 0.08
+
+    /// Suppresses transient vertical inset *drops* during stack transitions (host/window mismatch):
+    /// defer commit ~one frame so a bounce-back does not emit an intermediate AppBar height.
+    private var deferredInsetDecreaseWorkItem: DispatchWorkItem?
+    private let insetDecreaseDeferSeconds: TimeInterval = 0.048
+    private let insetDecreaseThresholdPt: CGFloat = 1.0
 
     @objc public required init(param: Any) {
         super.init()
@@ -138,29 +185,53 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     }
 
     private func fallbackSafeAreaInsets() -> UIEdgeInsets {
-        if let host = TamerInsetsModule.hostView {
-            let direct = host.safeAreaInsets
-            if direct.top > 0 || direct.bottom > 0 || direct.left > 0 || direct.right > 0 {
-                return direct
-            }
-            if let superview = host.superview {
-                let s = superview.safeAreaInsets
-                if s.top > 0 || s.bottom > 0 || s.left > 0 || s.right > 0 { return s }
-            }
-            return direct
+        let windowInsets = keyWindow()?.safeAreaInsets ?? .zero
+        guard let host = TamerInsetsModule.hostView else {
+            return windowInsets
         }
-        if let root = keyWindow()?.rootViewController?.view {
-            return root.safeAreaInsets
-        }
-        return keyWindow()?.safeAreaInsets ?? .zero
+        let h = host.safeAreaInsets
+        // During stack transitions the coordinator host can briefly report zero insets while the
+        // window still has the real safe area — merging avoids AppBar height/padding snapping.
+        return UIEdgeInsets(
+            top: max(h.top, windowInsets.top),
+            left: max(h.left, windowInsets.left),
+            bottom: max(h.bottom, windowInsets.bottom),
+            right: max(h.right, windowInsets.right)
+        )
     }
 
     fileprivate func publishCurrentInsets() {
-        let insets = fallbackSafeAreaInsets()
-        handleInsetsChange(insets)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.handleInsetsChange(self.fallbackSafeAreaInsets(), allowDefer: true)
+        }
     }
 
-    private func handleInsetsChange(_ insets: UIEdgeInsets) {
+    private func handleInsetsChange(_ insets: UIEdgeInsets, allowDefer: Bool = true) {
+        if allowDefer {
+            let top = insets.top
+            let bottom = insets.bottom
+            let vertDecrease =
+                (lastTop >= 0 && top < lastTop - insetDecreaseThresholdPt)
+                || (lastBottom >= 0 && bottom < lastBottom - insetDecreaseThresholdPt)
+            if vertDecrease {
+                deferredInsetDecreaseWorkItem?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self = self else { return }
+                    self.deferredInsetDecreaseWorkItem = nil
+                    self.handleInsetsChange(self.fallbackSafeAreaInsets(), allowDefer: false)
+                }
+                deferredInsetDecreaseWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + insetDecreaseDeferSeconds, execute: work)
+                return
+            }
+        }
+        deferredInsetDecreaseWorkItem?.cancel()
+        deferredInsetDecreaseWorkItem = nil
+        commitInsetsIfChanged(insets)
+    }
+
+    private func commitInsetsIfChanged(_ insets: UIEdgeInsets) {
         let top = insets.top
         let right = insets.right
         let bottom = insets.bottom

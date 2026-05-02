@@ -1,5 +1,7 @@
 package com.nanofuxion.tamerinsets
 
+import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
 import android.graphics.Rect
 import android.os.Build
@@ -56,10 +58,89 @@ class TamerInsetsModule(private val appContext: Context) : LynxModule(appContext
             view.post {
                 ViewCompat.requestApplyInsets(view)
                 ViewCompat.getRootWindowInsets(view)?.let { insets ->
-                    instance?.updateInsets(insets)
+                    instance?.updateInsets(insets, allowDefer = true)
                     instance?.updateKeyboardState(insets)
                 }
             }
+        }
+
+        /**
+         * JSON dictionary for embedding in Lynx `initialData` so the JS bundle
+         * reads real insets on its very first render rather than starting at zero
+         * and snapping when `tamer-insets:change` arrives ~50–150 ms later.
+         * Returns `null` when no host view is attached yet (cold launch path).
+         *
+         * Does NOT require `instance` to be set — Lynx constructs the module only
+         * during `renderTemplateUrl`, so hub callers run before the per-LynxView
+         * instance exists. Reads the live `WindowInsetsCompat` directly.
+         */
+        fun currentInsetsSnapshotJson(): String? {
+            val view = hostView ?: return null
+            val d = view.context.resources.displayMetrics.density.toDouble()
+            val state = computeInsetsStateForSnapshot(view) ?: return null
+            return "{\"top\":${state.top / d},\"right\":${state.right / d},\"bottom\":${state.bottom / d},\"left\":${state.left / d}}"
+        }
+
+        @SuppressLint("NewApi")
+        private fun computeInsetsStateForSnapshot(view: View): InsetsState? {
+            val live = ViewCompat.getRootWindowInsets(view)
+            val fromLive = live?.let { layoutInsetsForSnapshot(it, view.rootView ?: view) }
+            // ViewCompat.getRootWindowInsets returns null in onCreate before the first
+            // layout pass (cold launch path). Fall back to WindowManager.currentWindowMetrics
+            // which is populated immediately on API 30+.
+            val fromMetrics = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                (view.context as? Activity)?.let { act ->
+                    try {
+                        val metrics = act.windowManager.currentWindowMetrics
+                        val compat = WindowInsetsCompat.toWindowInsetsCompat(metrics.windowInsets)
+                        layoutInsetsForSnapshot(compat, view.rootView ?: view)
+                    } catch (_: Throwable) {
+                        null
+                    }
+                }
+            } else null
+            return when {
+                fromLive != null && fromMetrics != null -> InsetsState(
+                    maxOf(fromLive.top, fromMetrics.top),
+                    maxOf(fromLive.left, fromMetrics.left),
+                    maxOf(fromLive.right, fromMetrics.right),
+                    maxOf(fromLive.bottom, fromMetrics.bottom),
+                )
+                fromLive != null -> fromLive
+                fromMetrics != null -> fromMetrics
+                else -> null
+            }
+        }
+
+        private fun layoutInsetsForSnapshot(insets: WindowInsetsCompat, rootView: View): InsetsState {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val typeMask =
+                    WindowInsetsCompat.Type.statusBars() or
+                        WindowInsetsCompat.Type.displayCutout() or
+                        WindowInsetsCompat.Type.navigationBars() or
+                        WindowInsetsCompat.Type.captionBar()
+                val ins = insets.getInsets(typeMask)
+                return InsetsState(ins.top, ins.left, ins.right, ins.bottom)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                @Suppress("DEPRECATION")
+                val bottom = min(insets.systemWindowInsetBottom, insets.stableInsetBottom)
+                @Suppress("DEPRECATION")
+                return InsetsState(
+                    insets.systemWindowInsetTop,
+                    insets.systemWindowInsetLeft,
+                    insets.systemWindowInsetRight,
+                    bottom,
+                )
+            }
+            val visibleRect = Rect()
+            rootView.getWindowVisibleDisplayFrame(visibleRect)
+            return InsetsState(
+                visibleRect.top,
+                visibleRect.left,
+                rootView.width - visibleRect.right,
+                rootView.height - visibleRect.bottom,
+            )
         }
     }
 
@@ -80,6 +161,13 @@ class TamerInsetsModule(private val appContext: Context) : LynxModule(appContext
     private var pendingHideRunnable: Runnable? = null
     private val HIDE_DEBOUNCE_MS = 80L
 
+    private var pendingInsetDecreaseRunnable: Runnable? = null
+    private val INSET_DECREASE_DEFER_MS = 48L
+    private val INSET_DECREASE_THRESHOLD_PX = 2
+
+    private var insetListenerCoalescePosted = false
+    private var coalescedListenerInsets: WindowInsetsCompat? = null
+
     /** Invalidates delayed [scheduleKeyboardInsetRefresh] runs after hide or a new show. */
     private var keyboardInsetRefreshGen: Int = 0
 
@@ -93,6 +181,10 @@ class TamerInsetsModule(private val appContext: Context) : LynxModule(appContext
     }
 
     fun resetCachedValues() {
+        pendingInsetDecreaseRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingInsetDecreaseRunnable = null
+        insetListenerCoalescePosted = false
+        coalescedListenerInsets = null
         lastTop = -1
         lastLeft = -1
         lastRight = -1
@@ -119,7 +211,16 @@ class TamerInsetsModule(private val appContext: Context) : LynxModule(appContext
         }
         view.viewTreeObserver.addOnGlobalFocusChangeListener(focusListener)
         ViewCompat.setOnApplyWindowInsetsListener(view) { _, insets ->
-            updateInsets(insets)
+            coalescedListenerInsets = insets
+            if (!insetListenerCoalescePosted) {
+                insetListenerCoalescePosted = true
+                mainHandler.post {
+                    insetListenerCoalescePosted = false
+                    val toApply = coalescedListenerInsets
+                    coalescedListenerInsets = null
+                    toApply?.let { updateInsets(it, allowDefer = true) }
+                }
+            }
             updateKeyboardState(insets)
             insets
         }
@@ -133,7 +234,7 @@ class TamerInsetsModule(private val appContext: Context) : LynxModule(appContext
         view.post {
             ViewCompat.requestApplyInsets(view)
             ViewCompat.getRootWindowInsets(view)?.let {
-                updateInsets(it)
+                updateInsets(it, allowDefer = true)
                 updateKeyboardState(it)
             } ?: view.postDelayed({ reRequestInsets() }, 100)
         }
@@ -262,13 +363,73 @@ class TamerInsetsModule(private val appContext: Context) : LynxModule(appContext
         }
     }
 
-    private fun updateInsets(insets: WindowInsetsCompat) {
-        val root = hostView?.rootView ?: hostView
-        val state = layoutInsetsForHost(insets, root)
+    private fun mergeInsetStates(primary: InsetsState, vararg others: InsetsState?): InsetsState {
+        var t = primary.top
+        var l = primary.left
+        var r = primary.right
+        var b = primary.bottom
+        for (o in others) {
+            if (o == null) continue
+            t = maxOf(t, o.top)
+            l = maxOf(l, o.left)
+            r = maxOf(r, o.right)
+            b = maxOf(b, o.bottom)
+        }
+        return InsetsState(t, l, r, b)
+    }
+
+    /**
+     * During FragmentTransaction / stack push animations, [OnApplyWindowInsetsListener] can briefly
+     * report zero or reduced system bar insets while [WindowManager.currentWindowMetrics] still
+     * reflects the real bars — same idea as max(host, window) on iOS.
+     */
+    @SuppressLint("NewApi")
+    private fun stableInsetsFromWindowMetrics(hostView: View): InsetsState? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val act = hostView.context as? Activity ?: return null
+        return try {
+            val metrics = act.windowManager.currentWindowMetrics
+            val compat = WindowInsetsCompat.toWindowInsetsCompat(metrics.windowInsets)
+            val root = hostView.rootView ?: hostView
+            layoutInsetsForHost(compat, root)
+        } catch (e: Exception) {
+            Log.w("TamerInsets", "stableInsetsFromWindowMetrics failed", e)
+            null
+        }
+    }
+
+    private fun updateInsets(insets: WindowInsetsCompat, allowDefer: Boolean = true) {
+        val hv = hostView ?: return
+        val root = hv.rootView ?: hv
+        val fromListener = layoutInsetsForHost(insets, root)
+        val fromRoot = ViewCompat.getRootWindowInsets(hv)?.let { layoutInsetsForHost(it, root) }
+        val fromMetrics = stableInsetsFromWindowMetrics(hv)
+        val state = mergeInsetStates(fromListener, fromRoot, fromMetrics)
         val top = state.top
         val left = state.left
         val right = state.right
         val bottom = state.bottom
+
+        if (allowDefer) {
+            val vertDecrease =
+                (lastTop >= 0 && top < lastTop - INSET_DECREASE_THRESHOLD_PX) ||
+                    (lastBottom >= 0 && bottom < lastBottom - INSET_DECREASE_THRESHOLD_PX)
+            if (vertDecrease) {
+                pendingInsetDecreaseRunnable?.let { mainHandler.removeCallbacks(it) }
+                val r = Runnable {
+                    pendingInsetDecreaseRunnable = null
+                    hostView?.let { v ->
+                        ViewCompat.getRootWindowInsets(v)?.let { updateInsets(it, allowDefer = false) }
+                    }
+                }
+                pendingInsetDecreaseRunnable = r
+                mainHandler.postDelayed(r, INSET_DECREASE_DEFER_MS)
+                return
+            }
+        }
+        pendingInsetDecreaseRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingInsetDecreaseRunnable = null
+
         if (top == lastTop && left == lastLeft && right == lastRight && bottom == lastBottom) return
         lastTop = top
         lastLeft = left
@@ -333,7 +494,7 @@ class TamerInsetsModule(private val appContext: Context) : LynxModule(appContext
     fun getInsets(callback: Callback) {
         mainHandler.post {
             hostView?.let { view ->
-                ViewCompat.getRootWindowInsets(view)?.let { updateInsets(it) }
+                ViewCompat.getRootWindowInsets(view)?.let { updateInsets(it, allowDefer = true) }
             }
             val map = currentInsetsMap()
             try {

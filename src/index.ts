@@ -26,6 +26,7 @@ declare const lynx: {
     addListener?(e: string, fn: (ev: any) => void): void;
     removeListener?(e: string, fn: unknown): void;
   };
+  __initData?: Record<string, unknown>;
 } | undefined
 
 const DEFAULT_RAW_INSETS: Insets = { top: 0, right: 0, bottom: 0, left: 0 }
@@ -68,6 +69,18 @@ function parsePayload<T>(event: EventPayload<T> | string): T | null {
 
 export const TAMER_INSETS_SNAPSHOT_GLOBAL_KEY = '__tamerInsetsSnapshot'
 
+function isPlainInsetsShape(v: unknown): v is Insets {
+  return (
+    v != null &&
+    typeof v === 'object' &&
+    !Array.isArray(v) &&
+    typeof (v as Insets).top === 'number' &&
+    typeof (v as Insets).right === 'number' &&
+    typeof (v as Insets).bottom === 'number' &&
+    typeof (v as Insets).left === 'number'
+  )
+}
+
 function readInsetsSnapshotFromGlobal(): InsetsWithRaw | null {
   try {
     const g = globalThis as Record<string, unknown>
@@ -80,6 +93,16 @@ function readInsetsSnapshotFromGlobal(): InsetsWithRaw | null {
       typeof (v as InsetsWithRaw).raw === 'object'
     ) {
       return v as InsetsWithRaw
+    }
+  } catch (_) {}
+  // Fallback: native pre-seeds the snapshot via Lynx initialData under the same
+  // key so the very first render of every spoke (and the hub) has real insets.
+  try {
+    const initData = (typeof lynx !== 'undefined' ? lynx?.__initData : undefined)
+      ?? (globalThis as any)?.lynx?.__initData
+    const snap = initData?.[TAMER_INSETS_SNAPSHOT_GLOBAL_KEY]
+    if (isPlainInsetsShape(snap)) {
+      return toInsets(snap)
     }
   } catch (_) {}
   return null

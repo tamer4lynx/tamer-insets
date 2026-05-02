@@ -38,6 +38,15 @@ function parsePayload(event) {
     return event;
 }
 export const TAMER_INSETS_SNAPSHOT_GLOBAL_KEY = '__tamerInsetsSnapshot';
+function isPlainInsetsShape(v) {
+    return (v != null &&
+        typeof v === 'object' &&
+        !Array.isArray(v) &&
+        typeof v.top === 'number' &&
+        typeof v.right === 'number' &&
+        typeof v.bottom === 'number' &&
+        typeof v.left === 'number');
+}
 function readInsetsSnapshotFromGlobal() {
     try {
         const g = globalThis;
@@ -48,6 +57,17 @@ function readInsetsSnapshotFromGlobal() {
             typeof v.top === 'number' &&
             typeof v.raw === 'object') {
             return v;
+        }
+    }
+    catch (_) { }
+    // Fallback: native pre-seeds the snapshot via Lynx initialData under the same
+    // key so the very first render of every spoke (and the hub) has real insets.
+    try {
+        const initData = (typeof lynx !== 'undefined' ? lynx?.__initData : undefined)
+            ?? globalThis?.lynx?.__initData;
+        const snap = initData?.[TAMER_INSETS_SNAPSHOT_GLOBAL_KEY];
+        if (isPlainInsetsShape(snap)) {
+            return toInsets(snap);
         }
     }
     catch (_) { }
