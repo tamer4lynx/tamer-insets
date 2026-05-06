@@ -10,6 +10,36 @@ private final class SafeAreaObserverView: UIView {
     }
 }
 
+private final class KeyboardLayoutObserverView: UIView {
+    var onLayout: ((CGRect) -> Void)?
+    private var lastFrame: CGRect = .null
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+        accessibilityElementsHidden = true
+        backgroundColor = .clear
+        alpha = 0.001
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+        accessibilityElementsHidden = true
+        backgroundColor = .clear
+        alpha = 0.001
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard frame != lastFrame else { return }
+        lastFrame = frame
+        onLayout?(frame)
+    }
+}
+
 @objcMembers
 public final class TamerInsetsModule: NSObject, LynxModule {
 
@@ -29,6 +59,8 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     /// Lynx root view (same role as Android `attachHostView`). Required for correct safe-area + keyboard overlap on iOS.
     public static weak var hostView: UIView?
     private static var safeAreaObserver: SafeAreaObserverView?
+    private static var keyboardLayoutObserver: KeyboardLayoutObserverView?
+    private static var keyboardLayoutConstraints: [NSLayoutConstraint] = []
 
     private static func registerInstance(_ instance: TamerInsetsModule) {
         instancesLock.lock()
@@ -47,10 +79,14 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         DispatchQueue.main.async {
             TamerInsetsModule.safeAreaObserver?.removeFromSuperview()
             TamerInsetsModule.safeAreaObserver = nil
+            TamerInsetsModule.detachKeyboardLayoutObserver()
             TamerInsetsModule.hostView = view
 
             // Reset per-instance caches so next publish always emits to each active Lynx runtime.
-            TamerInsetsModule.liveInstances().forEach { $0.resetInsetsCache() }
+            TamerInsetsModule.liveInstances().forEach {
+                $0.resetInsetsCache()
+                $0.resetKeyboardState(emit: true, duration: 0)
+            }
 
             guard let host = view else {
                 TamerInsetsModule.liveInstances().forEach { $0.publishCurrentInsets() }
@@ -68,7 +104,51 @@ public final class TamerInsetsModule: NSObject, LynxModule {
             observer.onChange = { _ in
                 TamerInsetsModule.liveInstances().forEach { $0.publishCurrentInsets() }
             }
+            TamerInsetsModule.attachKeyboardLayoutObserver(to: host)
             TamerInsetsModule.liveInstances().forEach { $0.publishCurrentInsets() }
+        }
+    }
+
+    private static func detachKeyboardLayoutObserver() {
+        if !keyboardLayoutConstraints.isEmpty {
+            NSLayoutConstraint.deactivate(keyboardLayoutConstraints)
+            keyboardLayoutConstraints = []
+        }
+        keyboardLayoutObserver?.removeFromSuperview()
+        keyboardLayoutObserver = nil
+    }
+
+    private static func attachKeyboardLayoutObserver(to host: UIView) {
+        guard #available(iOS 15.0, *) else { return }
+
+        let observer = KeyboardLayoutObserverView(frame: .zero)
+        observer.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(observer)
+
+        let guide = host.keyboardLayoutGuide
+        guide.followsUndockedKeyboard = true
+
+        let constraints = [
+            observer.topAnchor.constraint(equalTo: guide.topAnchor),
+            observer.rightAnchor.constraint(equalTo: guide.rightAnchor),
+            observer.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
+            observer.leftAnchor.constraint(equalTo: guide.leftAnchor),
+        ]
+        NSLayoutConstraint.activate(constraints)
+        keyboardLayoutObserver = observer
+        keyboardLayoutConstraints = constraints
+
+        observer.onLayout = { frame in
+            TamerInsetsModule.liveInstances().forEach {
+                $0.publishKeyboardFromLayoutGuide(frame: frame, duration: $0.keyboardDuration, source: "layoutGuide")
+            }
+        }
+
+        host.setNeedsLayout()
+        host.layoutIfNeeded()
+        DispatchQueue.main.async {
+            guard TamerInsetsModule.keyboardLayoutObserver === observer else { return }
+            observer.onLayout?(observer.frame)
         }
     }
 
@@ -138,6 +218,7 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     private var keyboardDuration: Int = 0
     private var pendingHideWorkItem: DispatchWorkItem?
     private let hideDebounceInterval: TimeInterval = 0.08
+    private var keyboardLayoutRefreshGeneration: Int = 0
 
     /// Suppresses transient vertical inset *drops* during stack transitions (host/window mismatch):
     /// defer commit ~one frame so a bounce-back does not emit an intermediate AppBar height.
@@ -171,6 +252,7 @@ public final class TamerInsetsModule: NSObject, LynxModule {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             self?.publishCurrentInsets()
+            self?.publishCurrentKeyboardFromLayoutGuide(source: "setup")
         }
     }
 
@@ -272,12 +354,147 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         return max(0, window.bounds.intersection(kbInWindow).height)
     }
 
+    private func keyboardOverlapHeight(layoutGuideFrame frame: CGRect) -> CGFloat {
+        guard let host = TamerInsetsModule.hostView,
+              !host.bounds.isEmpty,
+              !frame.isNull,
+              !frame.isInfinite else { return 0 }
+        let intersection = host.bounds.intersection(frame)
+        if intersection.isNull || intersection.isEmpty { return 0 }
+        return max(0, intersection.height)
+    }
+
+    private func keyboardLayoutGuideOverlap() -> CGFloat {
+        guard #available(iOS 15.0, *),
+              let observer = TamerInsetsModule.keyboardLayoutObserver,
+              let host = TamerInsetsModule.hostView else { return 0 }
+        host.setNeedsLayout()
+        host.layoutIfNeeded()
+        return keyboardOverlapHeight(layoutGuideFrame: observer.frame)
+    }
+
+    private func publishCurrentKeyboardFromLayoutGuide(source: String) {
+        guard #available(iOS 15.0, *) else { return }
+        guard let observer = TamerInsetsModule.keyboardLayoutObserver else { return }
+        publishKeyboardFromLayoutGuide(frame: observer.frame, duration: keyboardDuration, source: source)
+    }
+
+    private func publishKeyboardFromLayoutGuide(frame: CGRect, duration: Int, source: String) {
+        guard #available(iOS 15.0, *) else { return }
+        let overlap = keyboardOverlapHeight(layoutGuideFrame: frame)
+        applyKeyboardOverlap(overlap, forceVisible: nil, duration: duration, debounceHide: true, source: source)
+    }
+
+    private func publishKeyboardFromLayoutGuideOrFallback(
+        forceVisible: Bool?,
+        duration: Int,
+        fallbackOverlap: CGFloat,
+        source: String
+    ) {
+        guard #available(iOS 15.0, *) else {
+            applyKeyboardOverlap(fallbackOverlap, forceVisible: forceVisible, duration: duration, debounceHide: true, source: source)
+            return
+        }
+
+        let guideOverlap = keyboardLayoutGuideOverlap()
+        let safeBottom = fallbackSafeAreaInsets().bottom
+        let guideHasKeyboardOverlap = guideOverlap > safeBottom + 0.5
+        let overlap = guideHasKeyboardOverlap || fallbackOverlap <= safeBottom + 0.5 ? guideOverlap : fallbackOverlap
+        applyKeyboardOverlap(overlap, forceVisible: forceVisible, duration: duration, debounceHide: true, source: source)
+    }
+
+    private func scheduleKeyboardLayoutGuideRefresh(
+        forceVisible: Bool?,
+        duration: Int,
+        fallbackOverlap: CGFloat,
+        source: String
+    ) {
+        guard #available(iOS 15.0, *) else { return }
+        keyboardLayoutRefreshGeneration += 1
+        let generation = keyboardLayoutRefreshGeneration
+        for delay in [0.0, 0.032, 0.096] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self,
+                      self.keyboardLayoutRefreshGeneration == generation else { return }
+                self.publishKeyboardFromLayoutGuideOrFallback(
+                    forceVisible: forceVisible,
+                    duration: duration,
+                    fallbackOverlap: fallbackOverlap,
+                    source: "\(source)-sample"
+                )
+            }
+        }
+    }
+
+    private func applyKeyboardOverlap(
+        _ overlap: CGFloat,
+        forceVisible: Bool?,
+        duration: Int,
+        debounceHide: Bool,
+        source: String
+    ) {
+        let safeBottom = fallbackSafeAreaInsets().bottom
+        let overlapVisible: Bool
+        if let forced = forceVisible {
+            overlapVisible = forced && overlap > 0.5
+        } else {
+            overlapVisible = overlap > safeBottom + 0.5
+        }
+        let heightAboveSafe = overlapVisible ? max(overlap - safeBottom, 0) : 0
+        let visible = overlapVisible && heightAboveSafe > 0.5
+        let height = visible ? CGFloat(Int(round(heightAboveSafe))) : 0
+
+        if visible {
+            pendingHideWorkItem?.cancel()
+            pendingHideWorkItem = nil
+            if isKeyboardVisible && keyboardHeight == height && keyboardDuration == duration { return }
+            isKeyboardVisible = true
+            keyboardHeight = height
+            keyboardDuration = duration
+            sendEvent("tamer-insets:keyboard",
+                      payload: "{\"visible\":true,\"height\":\(height),\"duration\":\(duration)}")
+            return
+        }
+
+        if debounceHide {
+            if !isKeyboardVisible && keyboardHeight == 0 {
+                keyboardDuration = duration
+                return
+            }
+            pendingHideWorkItem?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                self.pendingHideWorkItem = nil
+                self.resetKeyboardState(emit: true, duration: duration)
+            }
+            pendingHideWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + hideDebounceInterval, execute: work)
+        } else {
+            resetKeyboardState(emit: true, duration: duration)
+        }
+    }
+
+    fileprivate func resetKeyboardState(emit: Bool, duration: Int) {
+        pendingHideWorkItem?.cancel()
+        pendingHideWorkItem = nil
+        keyboardLayoutRefreshGeneration += 1
+        let changed = isKeyboardVisible || keyboardHeight > 0 || keyboardDuration != duration
+        isKeyboardVisible = false
+        keyboardHeight = 0
+        keyboardDuration = duration
+        if emit && changed {
+            sendEvent("tamer-insets:keyboard",
+                      payload: "{\"visible\":false,\"height\":0,\"duration\":\(duration)}")
+        }
+    }
+
     private func handleKeyboardNotification(_ notification: Notification, forceVisible: Bool?) {
         guard let userInfo = notification.userInfo,
               let endFrameScreen = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
 
         let overlap = keyboardOverlapHeight(endFrameScreen: endFrameScreen)
         let safeBottom = fallbackSafeAreaInsets().bottom
+        let duration = Int(((userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25) * 1000)
         NSLog("[TamerInsets] kb notif=%@ endScreen=%@ overlap=%0.2f safeBottom=%0.2f host=%@ hostWindow=%@",
               notification.name.rawValue,
               NSCoder.string(for: endFrameScreen),
@@ -285,47 +502,22 @@ public final class TamerInsetsModule: NSObject, LynxModule {
               safeBottom,
               TamerInsetsModule.hostView.map { "\($0)" } ?? "nil",
               (TamerInsetsModule.hostView?.window).map { "\($0)" } ?? "nil")
-        let overlapVisible: Bool
-        if let forced = forceVisible {
-            overlapVisible = forced && overlap > 0.5
-        } else {
-            overlapVisible = overlap > 0.5
-        }
-        // Overlap includes the home-indicator strip; subtract so JS matches SafeArea bottom padding.
-        let heightAboveSafe = overlapVisible ? max(overlap - safeBottom, 0) : 0
-        let visible = overlapVisible && heightAboveSafe > 0
-        let height = visible ? heightAboveSafe : 0
-        let duration = Int(((userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25) * 1000)
 
-        if visible {
-            // Cancel any pending hide — this is a show or re-show.
-            pendingHideWorkItem?.cancel()
-            pendingHideWorkItem = nil
-            if visible == isKeyboardVisible && height == keyboardHeight { return }
-            isKeyboardVisible = visible
-            keyboardHeight = height
-            keyboardDuration = duration
-            let payload = "{\"visible\":true,\"height\":\(height),\"duration\":\(duration)}"
-            sendEvent("tamer-insets:keyboard", payload: payload)
+        if #available(iOS 15.0, *) {
+            publishKeyboardFromLayoutGuideOrFallback(
+                forceVisible: forceVisible,
+                duration: duration,
+                fallbackOverlap: overlap,
+                source: notification.name.rawValue
+            )
+            scheduleKeyboardLayoutGuideRefresh(
+                forceVisible: forceVisible,
+                duration: duration,
+                fallbackOverlap: overlap,
+                source: notification.name.rawValue
+            )
         } else {
-            // Debounce the hide: iOS fires keyboardWillHide → keyboardWillShow when
-            // focus moves between inputs. If a show arrives within hideDebounceInterval
-            // the hide is cancelled and JS never sees the collapsed state.
-            if !isKeyboardVisible && keyboardHeight == 0 { return }
-            pendingHideWorkItem?.cancel()
-            let work = DispatchWorkItem { [weak self] in
-                guard let self = self else { return }
-                self.pendingHideWorkItem = nil
-                if self.isKeyboardVisible || self.keyboardHeight > 0 {
-                    self.isKeyboardVisible = false
-                    self.keyboardHeight = 0
-                    self.keyboardDuration = duration
-                    self.sendEvent("tamer-insets:keyboard",
-                                   payload: "{\"visible\":false,\"height\":0,\"duration\":\(duration)}")
-                }
-            }
-            pendingHideWorkItem = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + hideDebounceInterval, execute: work)
+            applyKeyboardOverlap(overlap, forceVisible: forceVisible, duration: duration, debounceHide: true, source: notification.name.rawValue)
         }
     }
 
@@ -353,12 +545,31 @@ public final class TamerInsetsModule: NSObject, LynxModule {
     private func sendEvent(_ name: String, payload: String) {
         let params: [[String: Any]] = [["payload": payload]]
         DispatchQueue.main.async { [weak self] in
-            let ctx = self?.lynxContext ?? TamerInsetsModule.shared?.lynxContext
-            ctx?.sendGlobalEvent(name, withParams: params)
+            let logKeyboardEvent = {
+                if name == "tamer-insets:keyboard" {
+                    NSLog("[TamerInsets] emit %@ %@", name, payload)
+                }
+            }
+            if let ctx = self?.lynxContext {
+                logKeyboardEvent()
+                ctx.sendGlobalEvent(name, withParams: params)
+                return
+            }
+            guard let self = self, self === TamerInsetsModule.shared else { return }
+            if let view = TamerInsetsModule.hostView as? LynxView {
+                logKeyboardEvent()
+                view.sendGlobalEvent(name, withParams: params)
+                return
+            }
+            if let ctx = TamerInsetsModule.shared?.lynxContext {
+                logKeyboardEvent()
+                ctx.sendGlobalEvent(name, withParams: params)
+            }
         }
     }
 
     deinit {
+        keyboardLayoutRefreshGeneration += 1
         pendingHideWorkItem?.cancel()
         pendingHideWorkItem = nil
         NotificationCenter.default.removeObserver(self)
@@ -366,11 +577,19 @@ public final class TamerInsetsModule: NSObject, LynxModule {
         TamerInsetsModule.safeAreaObserver = nil
         if let obs = observer {
             if Thread.isMainThread {
+                TamerInsetsModule.detachKeyboardLayoutObserver()
                 obs.removeFromSuperview()
             } else {
                 DispatchQueue.main.async {
+                    TamerInsetsModule.detachKeyboardLayoutObserver()
                     obs.removeFromSuperview()
                 }
+            }
+        } else if Thread.isMainThread {
+            TamerInsetsModule.detachKeyboardLayoutObserver()
+        } else {
+            DispatchQueue.main.async {
+                TamerInsetsModule.detachKeyboardLayoutObserver()
             }
         }
     }
